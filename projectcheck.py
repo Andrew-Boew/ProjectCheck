@@ -5,13 +5,16 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
+import sys
 import tempfile
 import tomllib
 import tokenize
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 DEFAULT_MAX_SIZE_MIB = 10
+SECURITY_CODES = {"SENSITIVE", "HARDCODED_SECRET", "PRIVATE_KEY_BLOCK"}
 CONTENT_SCAN_BYTES = 2 * 1024 * 1024
 TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
@@ -414,12 +417,68 @@ def load_config(project: Path) -> tuple[int, tuple[str, ...]]:
     return max_size_mib, tuple(excludes)
 
 
+def install_hook(project: Path) -> Path:
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True,
+        )
+        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
+            raise ValueError("установка hook требует корень Git-репозитория")
+        configured = subprocess.run(
+            ["git", "-C", str(project), "config", "--path", "--get", "core.hooksPath"],
+            capture_output=True, text=True,
+        )
+        if configured.returncode == 0:
+            hooks = Path(configured.stdout.strip())
+            if not hooks.is_absolute():
+                hooks = project / hooks
+        elif configured.returncode == 1:
+            default = subprocess.run(
+                ["git", "-C", str(project), "rev-parse", "--git-path", "hooks"],
+                capture_output=True, text=True,
+            )
+            if default.returncode != 0:
+                raise ValueError("не удалось найти каталог Git hooks")
+            hooks = Path(default.stdout.strip())
+            if not hooks.is_absolute():
+                hooks = project / hooks
+        else:
+            raise ValueError("не удалось прочитать настройку core.hooksPath")
+        hooks.mkdir(parents=True, exist_ok=True)
+        hook = hooks / "pre-commit"
+        base = f"exec {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} \"$repo_root\" --staged"
+        prefix = '#!/bin/sh\nrepo_root=$(git rev-parse --show-toplevel) || exit 2\n'
+        script = f"{prefix}{base} --fail-on-security\n"
+        previous_script = f"{prefix}{base} --fail-on-findings\n"
+        if hook.is_symlink():
+            raise ValueError("pre-commit уже существует; существующий hook не изменён")
+        if hook.exists():
+            current = hook.read_bytes()
+            if current == script.encode("utf-8"):
+                return hook
+            if current != previous_script.encode("utf-8"):
+                raise ValueError("pre-commit уже существует; существующий hook не изменён")
+            hook.write_text(script, encoding="utf-8")
+        else:
+            with hook.open("x", encoding="utf-8") as file:
+                file.write(script)
+        hook.chmod(0o755)
+        return hook
+    except FileExistsError as error:
+        raise ValueError("pre-commit уже существует; существующий hook не изменён") from error
+    except OSError as error:
+        raise ValueError(f"не удалось установить pre-commit: {error}") from error
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка локального проекта")
     parser.add_argument("project", type=Path, help="путь к проекту")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
     parser.add_argument("--fail-on-findings", action="store_true", help="код 1 при наличии замечаний")
+    parser.add_argument("--fail-on-security", action="store_true", help="код 1 только при находках безопасности")
     parser.add_argument("--staged", action="store_true", help="проверить подготовленные к коммиту файлы")
+    parser.add_argument("--install-hook", action="store_true", help="установить pre-commit hook")
     parser.add_argument("--max-size-mib", type=int, help="порог большого файла в МиБ")
     parser.add_argument("--exclude", action="append", default=[], metavar="PATTERN", help="исключить путь или шаблон")
     args = parser.parse_args()
@@ -427,6 +486,13 @@ def main() -> int:
     project = args.project.expanduser().resolve()
     if not project.is_dir():
         parser.error(f"папка не найдена: {project}")
+    if args.install_hook:
+        try:
+            hook = install_hook(project)
+        except ValueError as error:
+            parser.error(str(error))
+        print(f"Установлен pre-commit hook: {hook}")
+        return 0
 
     try:
         config_size_mib, config_excludes = load_config(project)
@@ -450,7 +516,9 @@ def main() -> int:
     if any(finding["code"] == "SCAN_ERROR" for finding in findings):
         exit_code = 2
     else:
-        exit_code = 1 if args.fail_on_findings and findings else 0
+        exit_code = 1 if (args.fail_on_findings and findings) or (
+            args.fail_on_security and any(finding["code"] in SECURITY_CODES for finding in findings)
+        ) else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
         return exit_code

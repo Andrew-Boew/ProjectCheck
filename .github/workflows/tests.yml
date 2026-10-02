@@ -13,3 +13,4 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m unittest -v
+      - run: python projectcheck.py . --fail-on-findings

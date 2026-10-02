@@ -1,6 +1,7 @@
 from contextlib import redirect_stdout
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -377,6 +378,73 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(secret_findings[0]["path"], ".github/workflows/tests.yml")
             self.assertEqual(secret_findings[0]["line"], 2)
             self.assertFalse(any(item["code"] == "CI" for item in findings))
+
+    def test_installed_hook_blocks_security_but_allows_other_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            (project / "README.md").write_text("Project\n")
+            (project / ".gitignore").write_text(".venv/\n")
+            (project / "LICENSE").write_text("License\n")
+            (project / ".gitlab-ci.yml").write_text("test: {}\n")
+            (project / "test_app.py").write_text("pass\n")
+            config = project / "config.py"
+            config.write_text('API_TOKEN = "secret-value"\n')
+            subprocess.run(["git", "-C", directory, "add", "."], check=True)
+
+            hook = projectcheck.install_hook(project)
+            self.assertEqual(hook.stat().st_mode & 0o111, 0o111)
+            result = subprocess.run([hook], cwd=project, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("HARDCODED_SECRET", result.stdout)
+            self.assertNotIn("secret-value", result.stdout)
+
+            config.write_text('API_TOKEN = os.getenv("API_TOKEN")\n')
+            subprocess.run(["git", "-C", directory, "add", "config.py"], check=True)
+            result = subprocess.run([hook], cwd=project, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout.strip(), "Замечаний не найдено")
+            subprocess.run(["git", "-C", directory, "rm", "--cached", "LICENSE"], check=True, capture_output=True)
+            result = subprocess.run([hook], cwd=project, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("LICENSE", result.stdout)
+            strict = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--staged", "--fail-on-findings"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(strict.returncode, 1)
+            original = hook.read_text()
+            self.assertEqual(projectcheck.install_hook(project), hook)
+            hook.write_text(original.replace("--fail-on-security", "--fail-on-findings"))
+            self.assertEqual(projectcheck.install_hook(project), hook)
+            self.assertEqual(hook.read_text(), original)
+            hook.write_text("#!/bin/sh\nexit 0\n")
+            with self.assertRaisesRegex(ValueError, "уже существует"):
+                projectcheck.install_hook(project)
+            self.assertEqual(hook.read_text(), "#!/bin/sh\nexit 0\n")
+
+    def test_versioned_hook_checks_staged_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            shutil.copy2(projectcheck.__file__, project / "projectcheck.py")
+            hooks = project / ".githooks"
+            hooks.mkdir()
+            hook = hooks / "pre-commit"
+            shutil.copy2(Path(projectcheck.__file__).parent / ".githooks" / "pre-commit", hook)
+            (project / "README.md").write_text("Project\n")
+            (project / ".gitignore").write_text(".venv/\n")
+            (project / "LICENSE").write_text("License\n")
+            (project / ".gitlab-ci.yml").write_text("test: {}\n")
+            (project / "test_app.py").write_text("pass\n")
+            config = project / "config.py"
+            config.write_text('API_TOKEN = "staged-secret"\n')
+            subprocess.run(["git", "-C", directory, "add", "."], check=True)
+            config.write_text('API_TOKEN = os.getenv("API_TOKEN")\n')
+            result = subprocess.run([hook], cwd=project, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("HARDCODED_SECRET", result.stdout)
+            self.assertNotIn("staged-secret", result.stdout)
 
     def test_json_report_contains_findings_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

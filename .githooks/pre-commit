@@ -1,0 +1,3 @@
+#!/bin/sh
+repo_root=$(git rev-parse --show-toplevel) || exit 2
+exec python3 "$repo_root/projectcheck.py" "$repo_root" --staged --fail-on-security
