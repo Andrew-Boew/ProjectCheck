@@ -10,6 +10,12 @@ DEFAULT_MAX_SIZE_MIB = 10
 TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
+Finding = dict[str, str | None]
+
+
+def format_finding(item: Finding) -> str:
+    path = f" {item['path']}" if item["path"] else ""
+    return f"{item['code']}: {item['message']}{path}"
 
 
 def has_sensitive_name(path: Path) -> bool:
@@ -83,32 +89,36 @@ def project_files(project: Path, excludes: tuple[str, ...] = ()) -> list[Path]:
     return files
 
 
-def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[str]:
-    findings = []
+def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[Finding]:
+    findings: list[Finding] = []
     files = project_files(project, excludes)
     if not any((project / name).is_file() for name in ("README.md", "README.rst", "README.txt")):
-        findings.append("README: добавьте описание проекта")
+        findings.append({"code": "README", "message": "добавьте описание проекта", "path": None})
     if not (project / ".gitignore").is_file():
-        findings.append("GITIGNORE: добавьте .gitignore")
+        findings.append({"code": "GITIGNORE", "message": "добавьте .gitignore", "path": None})
     if not any(
         path.suffix == ".py" and (path.name.startswith("test_") or path.stem.endswith("_test"))
         for path in files
     ):
-        findings.append("TESTS: тесты не найдены")
+        findings.append({"code": "TESTS", "message": "тесты не найдены", "path": None})
 
     for path in files:
         relative = path.relative_to(project).as_posix()
         if has_sensitive_name(path):
-            findings.append(f"SENSITIVE: проверьте потенциально конфиденциальный файл {relative}")
+            findings.append({"code": "SENSITIVE", "message": "проверьте потенциально конфиденциальный файл", "path": relative})
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
-            findings.append(f"TEMP: временный файл {relative}")
+            findings.append({"code": "TEMP", "message": "временный файл", "path": relative})
         try:
             size = path.stat().st_size
         except OSError:
             continue
         if size > max_size_mib * 1024 * 1024:
-            findings.append(f"LARGE: файл больше {max_size_mib} МиБ {relative}")
+            findings.append({"code": "LARGE", "message": f"файл больше {max_size_mib} МиБ", "path": relative})
     return findings
+
+
+def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[str]:
+    return [format_finding(item) for item in scan_details(project, max_size_mib, excludes)]
 
 
 def main() -> int:
@@ -127,7 +137,7 @@ def main() -> int:
     if not project.is_dir():
         parser.error(f"папка не найдена: {project}")
 
-    findings = scan(project, max_size_mib=args.max_size_mib, excludes=tuple(args.exclude))
+    findings = scan_details(project, max_size_mib=args.max_size_mib, excludes=tuple(args.exclude))
     exit_code = 1 if args.fail_on_findings and findings else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
@@ -135,7 +145,7 @@ def main() -> int:
 
     if findings:
         for finding in findings:
-            print(f"- {finding}")
+            print(f"- {format_finding(finding)}")
         print(f"Найдено замечаний: {len(findings)}")
     else:
         print("Замечаний не найдено")

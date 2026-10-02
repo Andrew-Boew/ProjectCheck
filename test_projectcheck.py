@@ -145,6 +145,26 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(report["project"], str(Path(directory).resolve()))
             self.assertEqual(report["count"], 3)
             self.assertEqual(len(report["findings"]), report["count"])
+            self.assertEqual(report["findings"][0], {
+                "code": "README", "message": "добавьте описание проекта", "path": None
+            })
+
+    def test_json_finding_has_relative_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".env").write_text("TOKEN=example\n")
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--format", "json"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            findings = json.loads(result.stdout)["findings"]
+            self.assertIn({
+                "code": "SENSITIVE",
+                "message": "проверьте потенциально конфиденциальный файл",
+                "path": ".env",
+            }, findings)
 
     def test_fail_on_findings_returns_one_with_json_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
