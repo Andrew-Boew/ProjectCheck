@@ -111,7 +111,8 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
             findings.append({"code": "TEMP", "message": "временный файл", "path": relative})
         try:
             size = path.stat().st_size
-        except OSError:
+        except OSError as error:
+            findings.append({"code": "SCAN_ERROR", "message": f"не удалось получить размер файла: {error}", "path": relative})
             continue
         if size > max_size_mib * 1024 * 1024:
             findings.append({"code": "LARGE", "message": f"файл больше {max_size_mib} МиБ", "path": relative})
@@ -167,7 +168,10 @@ def main() -> int:
     excludes = config_excludes + tuple(args.exclude)
 
     findings = scan_details(project, max_size_mib=max_size_mib, excludes=excludes)
-    exit_code = 1 if args.fail_on_findings and findings else 0
+    if any(finding["code"] == "SCAN_ERROR" for finding in findings):
+        exit_code = 2
+    else:
+        exit_code = 1 if args.fail_on_findings and findings else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
         return exit_code

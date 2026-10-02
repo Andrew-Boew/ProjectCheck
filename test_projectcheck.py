@@ -1,8 +1,11 @@
+from contextlib import redirect_stdout
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import projectcheck
@@ -38,6 +41,34 @@ class ScanTests(unittest.TestCase):
             with (project / "video.mov").open("wb") as file:
                 file.truncate(10 * 1024 * 1024 + 1)
             self.assertIn("LARGE: файл больше 10 МиБ video.mov", scan(project))
+
+    def test_unreadable_file_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            target = project / "blocked.bin"
+            target.write_bytes(b"data")
+            original_stat = Path.stat
+
+            def stat_with_error(path: Path, *args: object, **kwargs: object) -> object:
+                if path == target:
+                    raise PermissionError("access denied")
+                return original_stat(path, *args, **kwargs)
+
+            with patch("projectcheck.project_files", return_value=[target]), patch.object(Path, "stat", stat_with_error):
+                findings = projectcheck.scan_details(project)
+            self.assertIn({
+                "code": "SCAN_ERROR",
+                "message": "не удалось получить размер файла: access denied",
+                "path": "blocked.bin",
+            }, findings)
+
+    def test_scan_error_returns_two_without_fail_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            error = {"code": "SCAN_ERROR", "message": "не удалось прочитать файл", "path": "blocked.bin"}
+            with patch("projectcheck.scan_details", return_value=[error]), patch.object(
+                sys, "argv", ["projectcheck.py", directory]
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(projectcheck.main(), 2)
 
     def test_custom_size_limit_is_applied(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
