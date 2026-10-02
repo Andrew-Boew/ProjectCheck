@@ -116,6 +116,23 @@ class ScanTests(unittest.TestCase):
             (project / ".env.example").write_text("TOKEN=\n")
             self.assertFalse(any(item.startswith("SENSITIVE:") for item in scan(project)))
 
+    def test_gitignored_sensitive_file_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            (project / ".gitignore").write_text(".env\n")
+            (project / ".env").write_text("TOKEN=example\n")
+            self.assertFalse(any(item.startswith("SENSITIVE:") for item in scan(project)))
+
+    def test_tracked_sensitive_file_is_reported_even_if_gitignored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            (project / ".gitignore").write_text(".env\n")
+            (project / ".env").write_text("TOKEN=example\n")
+            subprocess.run(["git", "-C", directory, "add", "-f", ".env"], check=True)
+            self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл .env", scan(project))
+
     def test_json_report_contains_findings_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(

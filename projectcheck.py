@@ -3,6 +3,7 @@ from fnmatch import fnmatchcase
 import json
 import os
 from pathlib import Path
+import subprocess
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 DEFAULT_MAX_SIZE_MIB = 10
@@ -28,7 +29,45 @@ def is_excluded(relative: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+def git_project_files(project: Path, excludes: tuple[str, ...]) -> list[Path] | None:
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
+            return None
+        result = subprocess.run(
+            ["git", "-C", str(project), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+
+    files = []
+    for raw_path in result.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        relative = os.fsdecode(raw_path)
+        path = project / relative
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and not any(part in IGNORED_DIRS for part in Path(relative).parts)
+            and not is_excluded(Path(relative).as_posix(), excludes)
+        ):
+            files.append(path)
+    return sorted(files)
+
+
 def project_files(project: Path, excludes: tuple[str, ...] = ()) -> list[Path]:
+    git_files = git_project_files(project, excludes)
+    if git_files is not None:
+        return git_files
+
     files = []
     for directory, subdirs, names in os.walk(project):
         subdirs[:] = sorted(
