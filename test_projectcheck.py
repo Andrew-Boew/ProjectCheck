@@ -62,6 +62,47 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("--max-size-mib должен быть положительным числом", result.stderr)
 
+    def test_config_applies_size_limit_and_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".projectcheck.toml").write_text('max_size_mib = 1\nexclude = ["*.bak"]\n')
+            (project / "notes.bak").write_text("backup")
+            with (project / "archive.zip").open("wb") as file:
+                file.truncate(2 * 1024 * 1024)
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("LARGE: файл больше 1 МиБ archive.zip", result.stdout)
+            self.assertNotIn("notes.bak", result.stdout)
+
+    def test_cli_size_limit_overrides_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".projectcheck.toml").write_text("max_size_mib = 1\n")
+            with (project / "archive.zip").open("wb") as file:
+                file.truncate(2 * 1024 * 1024)
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--max-size-mib", "3"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertNotIn("LARGE:", result.stdout)
+
+    def test_invalid_config_exits_with_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".projectcheck.toml").write_text("max_size_mib = 0\n")
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("max_size_mib должен быть положительным целым числом", result.stderr)
+
     def test_temporary_file_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 DEFAULT_MAX_SIZE_MIB = 10
@@ -121,23 +122,51 @@ def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tupl
     return [format_finding(item) for item in scan_details(project, max_size_mib, excludes)]
 
 
+def load_config(project: Path) -> tuple[int, tuple[str, ...]]:
+    path = project / ".projectcheck.toml"
+    if not path.exists():
+        return DEFAULT_MAX_SIZE_MIB, ()
+    try:
+        with path.open("rb") as file:
+            config = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"не удалось прочитать {path.name}: {error}") from error
+
+    unknown = set(config) - {"max_size_mib", "exclude"}
+    if unknown:
+        raise ValueError(f"неизвестные настройки в {path.name}: {', '.join(sorted(unknown))}")
+    max_size_mib = config.get("max_size_mib", DEFAULT_MAX_SIZE_MIB)
+    excludes = config.get("exclude", [])
+    if type(max_size_mib) is not int or max_size_mib <= 0:
+        raise ValueError("max_size_mib должен быть положительным целым числом")
+    if not isinstance(excludes, list) or any(not isinstance(pattern, str) or not pattern for pattern in excludes):
+        raise ValueError("exclude должен быть списком непустых строк")
+    return max_size_mib, tuple(excludes)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка локального проекта")
     parser.add_argument("project", type=Path, help="путь к проекту")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
     parser.add_argument("--fail-on-findings", action="store_true", help="код 1 при наличии замечаний")
-    parser.add_argument("--max-size-mib", type=int, default=DEFAULT_MAX_SIZE_MIB, help="порог большого файла в МиБ")
+    parser.add_argument("--max-size-mib", type=int, help="порог большого файла в МиБ")
     parser.add_argument("--exclude", action="append", default=[], metavar="PATTERN", help="исключить путь или шаблон")
     args = parser.parse_args()
-
-    if args.max_size_mib <= 0:
-        parser.error("--max-size-mib должен быть положительным числом")
 
     project = args.project.expanduser().resolve()
     if not project.is_dir():
         parser.error(f"папка не найдена: {project}")
 
-    findings = scan_details(project, max_size_mib=args.max_size_mib, excludes=tuple(args.exclude))
+    try:
+        config_size_mib, config_excludes = load_config(project)
+    except ValueError as error:
+        parser.error(str(error))
+    max_size_mib = args.max_size_mib if args.max_size_mib is not None else config_size_mib
+    if max_size_mib <= 0:
+        parser.error("--max-size-mib должен быть положительным числом")
+    excludes = config_excludes + tuple(args.exclude)
+
+    findings = scan_details(project, max_size_mib=max_size_mib, excludes=excludes)
     exit_code = 1 if args.fail_on_findings and findings else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
