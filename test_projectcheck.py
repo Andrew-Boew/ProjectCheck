@@ -13,15 +13,17 @@ from projectcheck import scan
 
 
 class ScanTests(unittest.TestCase):
-    def test_empty_project_has_three_findings(self) -> None:
+    def test_empty_project_has_five_findings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(len(scan(Path(directory))), 3)
+            self.assertEqual(len(scan(Path(directory))), 5)
 
     def test_complete_project_has_no_findings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             (project / "README.md").write_text("Project")
             (project / ".gitignore").write_text(".venv/\n")
+            (project / "LICENSE").write_text("License\n")
+            (project / ".gitlab-ci.yml").write_text("test: {}\n")
             tests = project / "tests"
             tests.mkdir()
             (tests / "test_example.py").write_text("def test_example(): pass\n")
@@ -324,6 +326,58 @@ class ScanTests(unittest.TestCase):
             self.assertIn("SCAN_ERROR: подготовленная версия отличается от файла на диске; содержимое коммита не проверено config.py", result.stdout)
             self.assertNotIn("staged-value", result.stdout)
 
+    def test_staged_mode_scans_index_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            (project / "README.md").write_text("Project\n")
+            (project / ".gitignore").write_text("*.tmp\n")
+            (project / "test_app.py").write_text("pass\n")
+            (project / "LICENSE").write_text("License\n")
+            (project / ".gitlab-ci.yml").write_text("test: {}\n")
+            config = project / "config.py"
+            config.write_text('SECRET_KEY = "staged-value"\n')
+            subprocess.run(["git", "-C", directory, "add", "."], check=True)
+            config.write_text('SECRET_KEY = os.getenv("SECRET_KEY")\n')
+
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--staged", "--format", "json"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0)
+            report = json.loads(result.stdout)
+            self.assertEqual([item["code"] for item in report["findings"]], ["HARDCODED_SECRET"])
+            self.assertEqual(report["findings"][0]["path"], "config.py")
+            self.assertNotIn("staged-value", result.stdout)
+
+    def test_project_readiness_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "package.json").write_text('{"name":"example"}\n')
+            (project / "requirements.txt").write_text("requests>=2\nflask==3.0\n")
+            findings = projectcheck.scan_details(project)
+            self.assertIn("DEPENDENCY_LOCK", [item["code"] for item in findings])
+            self.assertIn({
+                "code": "UNPINNED_DEPENDENCY", "message": "зависимость без точной версии",
+                "path": "requirements.txt", "line": 1, "confidence": "medium",
+            }, findings)
+            self.assertEqual(sum(item["code"] == "UNPINNED_DEPENDENCY" for item in findings), 1)
+
+    def test_ci_workflow_secret_assignment_and_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            workflows = project / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "tests.yml").write_text(
+                'env:\n  API_TOKEN: "literal-value"\n  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}\n'
+            )
+            findings = projectcheck.scan_details(project)
+            secret_findings = [item for item in findings if item["code"] == "HARDCODED_SECRET"]
+            self.assertEqual(len(secret_findings), 1)
+            self.assertEqual(secret_findings[0]["path"], ".github/workflows/tests.yml")
+            self.assertEqual(secret_findings[0]["line"], 2)
+            self.assertFalse(any(item["code"] == "CI" for item in findings))
+
     def test_json_report_contains_findings_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
@@ -334,7 +388,7 @@ class ScanTests(unittest.TestCase):
             )
             report = json.loads(result.stdout)
             self.assertEqual(report["project"], str(Path(directory).resolve()))
-            self.assertEqual(report["count"], 3)
+            self.assertEqual(report["count"], 5)
             self.assertEqual(len(report["findings"]), report["count"])
             self.assertEqual(report["findings"][0], {
                 "code": "README", "message": "добавьте описание проекта", "path": None,
@@ -387,7 +441,7 @@ class ScanTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(result.returncode, 1)
-            self.assertEqual(json.loads(result.stdout)["count"], 3)
+            self.assertEqual(json.loads(result.stdout)["count"], 5)
 
     def test_fail_on_findings_returns_zero_for_clean_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -395,6 +449,8 @@ class ScanTests(unittest.TestCase):
             (project / "README.md").write_text("Project")
             (project / ".gitignore").write_text(".venv/\n")
             (project / "test_example.py").write_text("pass\n")
+            (project / "LICENSE").write_text("License\n")
+            (project / ".gitlab-ci.yml").write_text("test: {}\n")
             result = subprocess.run(
                 [sys.executable, projectcheck.__file__, directory, "--fail-on-findings"],
                 capture_output=True,

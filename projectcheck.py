@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import tomllib
 import tokenize
 
@@ -21,6 +22,8 @@ YAML_CONFIG_NAMES = {
     "settings.yml", "settings.yaml", "config.yml", "config.yaml", "application.yml", "application.yaml",
     "compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml", "values.yml", "values.yaml",
 }
+NODE_LOCK_FILES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"}
+CI_FILES = {".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml", ".travis.yml"}
 PRIVATE_KEY_HEADER = re.compile(rb"^-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----$")
 Finding = dict[str, str | int | None]
 
@@ -148,6 +151,7 @@ def yaml_secret_findings(path: Path, relative: str) -> list[Finding]:
                     or value.lower() in {"null", "~", "|", ">"}
                     or value.startswith(("#", "!"))
                     or re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", value)
+                    or re.fullmatch(r"\$\{\{\s*[^{}]+\s*\}\}", value)
                 ):
                     continue
                 findings.append(make_finding(
@@ -169,6 +173,32 @@ def private_key_findings(path: Path, relative: str) -> list[Finding]:
     for line_number, line in enumerate(content.splitlines(), start=1):
         if PRIVATE_KEY_HEADER.fullmatch(line.strip()):
             findings.append(make_finding("PRIVATE_KEY_BLOCK", "найден заголовок приватного ключа", relative, line_number))
+    return findings
+
+
+def project_readiness_findings(files: list[Path], project: Path) -> list[Finding]:
+    names = {path.relative_to(project).as_posix() for path in files}
+    findings = []
+    if not any(name.lower() in {"license", "license.md", "license.txt", "copying", "copying.md", "copying.txt"} for name in names):
+        findings.append(make_finding("LICENSE", "файл лицензии не найден", confidence="medium"))
+    if not any(name in CI_FILES or (name.startswith(".github/workflows/") and name.endswith((".yml", ".yaml"))) for name in names):
+        findings.append(make_finding("CI", "конфигурация CI не найдена", confidence="medium"))
+    if "package.json" in names and not names.intersection(NODE_LOCK_FILES):
+        findings.append(make_finding("DEPENDENCY_LOCK", "для package.json не найден lock-файл", "package.json", confidence="medium"))
+    for path in files:
+        relative = path.relative_to(project).as_posix()
+        if path.name not in {"requirements.txt", "requirements-dev.txt"}:
+            continue
+        try:
+            with path.open("r", encoding="utf-8-sig") as file:
+                for line_number, line in enumerate(file, 1):
+                    item = line.strip()
+                    if not item or item.startswith(("#", "-", ".")) or "://" in item:
+                        continue
+                    if re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*(?:\[[^]]+\])?\s*(?:[;#]|$|[<>=!~])", item) and "==" not in item and "===" not in item:
+                        findings.append(make_finding("UNPINNED_DEPENDENCY", "зависимость без точной версии", relative, line_number, "medium"))
+        except (OSError, UnicodeError) as error:
+            findings.append(make_finding("SCAN_ERROR", f"не удалось прочитать зависимости: {error}", relative))
     return findings
 
 
@@ -250,6 +280,44 @@ def staged_mismatch_findings(project: Path, excludes: tuple[str, ...]) -> list[F
     return findings
 
 
+def staged_files(project: Path, destination: Path) -> None:
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True,
+        )
+        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
+            raise ValueError("--staged требует корень Git-репозитория")
+        entries = subprocess.run(
+            ["git", "-C", str(project), "ls-files", "--stage", "-z"], capture_output=True,
+        )
+        if entries.returncode != 0:
+            raise ValueError("не удалось получить список подготовленных файлов")
+        for entry in entries.stdout.split(b"\0"):
+            if not entry:
+                continue
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode, blob_id, stage = metadata.split()
+            if stage != b"0":
+                raise ValueError("в Git index есть неразрешённые конфликты")
+            relative = Path(os.fsdecode(raw_path))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("в Git index найден недопустимый путь")
+            if mode != b"100644" and mode != b"100755":
+                continue
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as file:
+                content = subprocess.run(
+                    ["git", "-C", str(project), "cat-file", "blob", blob_id.decode("ascii")],
+                    stdout=file, stderr=subprocess.PIPE,
+                )
+            if content.returncode != 0:
+                raise ValueError(f"не удалось прочитать подготовленный файл: {relative.as_posix()}")
+    except OSError as error:
+        raise ValueError(f"не удалось прочитать Git index: {error}") from error
+
+
 def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Finding] | None = None) -> list[Path]:
     git_files = git_project_files(project, excludes)
     if git_files is not None:
@@ -293,6 +361,7 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
         for path in files
     ):
         findings.append(make_finding("TESTS", "тесты не найдены", confidence="low"))
+    findings.extend(project_readiness_findings(files, project))
 
     for path in files:
         relative = path.relative_to(project).as_posix()
@@ -305,7 +374,7 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
             findings.extend(python_secret_findings(path, relative))
         if path.name in CONFIG_FILE_NAMES:
             findings.extend(config_secret_findings(path, relative))
-        if path.name in YAML_CONFIG_NAMES:
+        if path.name in YAML_CONFIG_NAMES or relative in CI_FILES or (relative.startswith(".github/workflows/") and path.suffix in {".yml", ".yaml"}):
             findings.extend(yaml_secret_findings(path, relative))
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
             findings.append(make_finding("TEMP", "временный файл", relative, confidence="medium"))
@@ -350,6 +419,7 @@ def main() -> int:
     parser.add_argument("project", type=Path, help="путь к проекту")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
     parser.add_argument("--fail-on-findings", action="store_true", help="код 1 при наличии замечаний")
+    parser.add_argument("--staged", action="store_true", help="проверить подготовленные к коммиту файлы")
     parser.add_argument("--max-size-mib", type=int, help="порог большого файла в МиБ")
     parser.add_argument("--exclude", action="append", default=[], metavar="PATTERN", help="исключить путь или шаблон")
     args = parser.parse_args()
@@ -367,7 +437,16 @@ def main() -> int:
         parser.error("--max-size-mib должен быть положительным числом")
     excludes = config_excludes + tuple(args.exclude)
 
-    findings = scan_details(project, max_size_mib=max_size_mib, excludes=excludes)
+    if args.staged:
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                snapshot = Path(directory)
+                staged_files(project, snapshot)
+                findings = scan_details(snapshot, max_size_mib=max_size_mib, excludes=excludes)
+        except ValueError as error:
+            parser.error(str(error))
+    else:
+        findings = scan_details(project, max_size_mib=max_size_mib, excludes=excludes)
     if any(finding["code"] == "SCAN_ERROR" for finding in findings):
         exit_code = 2
     else:
