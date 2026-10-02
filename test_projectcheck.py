@@ -212,6 +212,26 @@ class ScanTests(unittest.TestCase):
             (project / "config.py").write_text('import os\nSECRET_KEY = os.getenv("SECRET_KEY")\n')
             self.assertFalse(any(item.startswith("HARDCODED_SECRET:") for item in scan(project)))
 
+    def test_nested_json_secret_is_reported_without_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "config.json").write_text('{"database": {"password": "private-example"}}')
+            findings = scan(project)
+            self.assertIn("HARDCODED_SECRET: строковое значение поля database.password config.json", findings)
+            self.assertFalse(any("private-example" in item for item in findings))
+
+    def test_toml_camel_case_secret_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "settings.toml").write_text('[auth]\napiToken = "example"\n')
+            self.assertIn("HARDCODED_SECRET: строковое значение поля auth.apiToken settings.toml", scan(project))
+
+    def test_non_secret_json_string_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "config.json").write_text('{"database": {"host": "localhost"}}')
+            self.assertFalse(any(item.startswith("HARDCODED_SECRET:") for item in scan(project)))
+
     def test_environment_template_is_not_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

@@ -23,12 +23,12 @@ python3 projectcheck.py /путь/к/проекту --fail-on-findings
 | `GITIGNORE` | Наличие `.gitignore` в корне |
 | `TESTS` | Наличие Python-файла `test_*.py` или `*_test.py` |
 | `SENSITIVE` | Имена `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` и расширения `.key`, `.p12`, `.pfx` |
-| `HARDCODED_SECRET` | Непустые строковые литералы в переменных с именами вроде `SECRET_KEY`, `POSTGRES_PASSWORD` и `API_TOKEN` внутри `settings.py` или `config.py` |
+| `HARDCODED_SECRET` | Непустые строковые значения секретных полей в `settings.py`, `config.py`, а также в `settings.json`, `config.json`, `appsettings.json`, `settings.toml`, `config.toml` и `pyproject.toml` |
 | `TEMP` | Расширения `.tmp`, `.bak`, `.swp`, `.swo`, имена с `~` на конце и `.DS_Store` |
 | `LARGE` | Файлы больше заданного порога, по умолчанию 10 МиБ |
 | `SCAN_ERROR` | Ошибка чтения папки или получения размера файла |
 
-Для `.env.example`, `.env.sample` и `.env.template` предупреждение `SENSITIVE` не создаётся. Эта проверка смотрит только на имя файла. Проверка `HARDCODED_SECRET` разбирает Python-код, но не выводит найденное значение секрета. Присваивание через `os.getenv()` не считается строковым литералом. Проверка `TESTS` пока распознаёт только Python-тесты.
+Для `.env.example`, `.env.sample` и `.env.template` предупреждение `SENSITIVE` не создаётся. Эта проверка смотрит только на имя файла. Проверка `HARDCODED_SECRET` разбирает Python-код и вложенные JSON/TOML-объекты, но не выводит найденное значение секрета. Присваивание через `os.getenv()` не считается строковым литералом. Для JSON/TOML номер строки пока не определяется. Проверка `TESTS` пока распознаёт только Python-тесты.
 
 ## Настройки
 

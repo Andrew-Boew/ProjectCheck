@@ -4,6 +4,7 @@ from fnmatch import fnmatchcase
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tomllib
 import tokenize
@@ -14,6 +15,7 @@ TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
 SECRET_SETTING_SUFFIXES = ("SECRET", "SECRET_KEY", "PASSWORD", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL", "CREDENTIALS")
+CONFIG_FILE_NAMES = {"settings.json", "config.json", "appsettings.json", "settings.toml", "config.toml", "pyproject.toml"}
 Finding = dict[str, str | int | None]
 
 
@@ -36,7 +38,7 @@ def has_sensitive_name(path: Path) -> bool:
 
 
 def is_secret_setting(name: str) -> bool:
-    upper = name.upper()
+    upper = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).upper()
     return any(upper == suffix or upper.endswith(f"_{suffix}") for suffix in SECRET_SETTING_SUFFIXES)
 
 
@@ -64,6 +66,37 @@ def python_secret_findings(path: Path, relative: str) -> list[Finding]:
                 findings.append(make_finding(
                     "HARDCODED_SECRET", f"строковый литерал в {target.id}", relative, node.lineno, "medium"
                 ))
+    return findings
+
+
+def config_secret_findings(path: Path, relative: str) -> list[Finding]:
+    try:
+        if path.suffix == ".json":
+            with path.open("r", encoding="utf-8-sig") as file:
+                data = json.load(file)
+        else:
+            with path.open("rb") as file:
+                data = tomllib.load(file)
+    except (OSError, UnicodeError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
+        return [make_finding("SCAN_ERROR", f"не удалось разобрать конфигурацию: {error}", relative)]
+
+    findings = []
+
+    def inspect(value: object, key_path: str = "") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{key_path}.{key}" if key_path else str(key)
+                if isinstance(child, str) and child.strip() and is_secret_setting(str(key)):
+                    findings.append(make_finding(
+                        "HARDCODED_SECRET", f"строковое значение поля {child_path}", relative, confidence="medium"
+                    ))
+                else:
+                    inspect(child, child_path)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                inspect(child, f"{key_path}[{index}]")
+
+    inspect(data)
     return findings
 
 
@@ -160,6 +193,8 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
             findings.append(make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", relative, confidence="medium"))
         if path.name in {"settings.py", "config.py"}:
             findings.extend(python_secret_findings(path, relative))
+        if path.name in CONFIG_FILE_NAMES:
+            findings.extend(config_secret_findings(path, relative))
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
             findings.append(make_finding("TEMP", "временный файл", relative, confidence="medium"))
         try:
