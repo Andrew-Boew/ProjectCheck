@@ -23,12 +23,12 @@ python3 projectcheck.py /путь/к/проекту --fail-on-findings
 | `GITIGNORE` | Наличие `.gitignore` в корне |
 | `TESTS` | Наличие Python-файла `test_*.py` или `*_test.py` |
 | `SENSITIVE` | Имена `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` и расширения `.key`, `.p12`, `.pfx` |
-| `HARDCODED_SECRET` | Непустые строковые значения секретных полей в `settings.py`, `config.py`, а также в `settings.json`, `config.json`, `appsettings.json`, `settings.toml`, `config.toml` и `pyproject.toml` |
+| `HARDCODED_SECRET` | Непустые строковые значения секретных полей в Python, JSON, TOML и YAML-конфигурациях, а также заполненные секретные переменные в `.env` |
 | `TEMP` | Расширения `.tmp`, `.bak`, `.swp`, `.swo`, имена с `~` на конце и `.DS_Store` |
 | `LARGE` | Файлы больше заданного порога, по умолчанию 10 МиБ |
 | `SCAN_ERROR` | Ошибка чтения папки или получения размера файла |
 
-Для `.env.example`, `.env.sample` и `.env.template` предупреждение `SENSITIVE` не создаётся. Эта проверка смотрит только на имя файла. Проверка `HARDCODED_SECRET` разбирает Python-код и вложенные JSON/TOML-объекты, но не выводит найденное значение секрета. Присваивание через `os.getenv()` не считается строковым литералом. Для JSON/TOML номер строки пока не определяется. Проверка `TESTS` пока распознаёт только Python-тесты.
+Для `.env.example`, `.env.sample` и `.env.template` предупреждение `SENSITIVE` не создаётся, и их содержимое не проверяется. Проверка `HARDCODED_SECRET` разбирает `settings.py`, `config.py`, `settings.json`, `config.json`, `appsettings.json`, `settings.toml`, `config.toml`, `pyproject.toml`, проверяемые `.env`-файлы, а также YAML-файлы с именами `settings`, `config`, `application`, `compose`, `docker-compose` или `values` и расширением `.yml`/`.yaml`. Значение секрета в отчёт не выводится. Пустые значения и ссылки вида `${VAR}`, а также присваивание через `os.getenv()` в Python не считаются захардкоженным значением. Для JSON/TOML номер строки пока не определяется. YAML проверяется по простым строковым шаблонам, без полного разбора синтаксиса; возможны пропуски и ложные срабатывания. Проверка `TESTS` пока распознаёт только Python-тесты.
 
 ## Настройки
 

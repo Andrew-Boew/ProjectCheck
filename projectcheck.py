@@ -16,6 +16,10 @@ PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
 SECRET_SETTING_SUFFIXES = ("SECRET", "SECRET_KEY", "PASSWORD", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL", "CREDENTIALS")
 CONFIG_FILE_NAMES = {"settings.json", "config.json", "appsettings.json", "settings.toml", "config.toml", "pyproject.toml"}
+YAML_CONFIG_NAMES = {
+    "settings.yml", "settings.yaml", "config.yml", "config.yaml", "application.yml", "application.yaml",
+    "compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml", "values.yml", "values.yaml",
+}
 Finding = dict[str, str | int | None]
 
 
@@ -38,7 +42,7 @@ def has_sensitive_name(path: Path) -> bool:
 
 
 def is_secret_setting(name: str) -> bool:
-    upper = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).upper()
+    upper = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).replace("-", "_").upper()
     return any(upper == suffix or upper.endswith(f"_{suffix}") for suffix in SECRET_SETTING_SUFFIXES)
 
 
@@ -97,6 +101,58 @@ def config_secret_findings(path: Path, relative: str) -> list[Finding]:
                 inspect(child, f"{key_path}[{index}]")
 
     inspect(data)
+    return findings
+
+
+def dotenv_secret_findings(path: Path, relative: str) -> list[Finding]:
+    findings = []
+    try:
+        with path.open("r", encoding="utf-8-sig") as file:
+            for line_number, text in enumerate(file, start=1):
+                match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", text)
+                if not match or not is_secret_setting(match.group(1)):
+                    continue
+                value = match.group(2).strip()
+                if (
+                    not value
+                    or value in {'""', "''"}
+                    or value.startswith("#")
+                    or re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", value)
+                ):
+                    continue
+                findings.append(make_finding(
+                    "HARDCODED_SECRET", f"заполненная переменная {match.group(1)}", relative, line_number, "medium"
+                ))
+    except (OSError, UnicodeError) as error:
+        return [make_finding("SCAN_ERROR", f"не удалось прочитать env-файл: {error}", relative)]
+    return findings
+
+
+def yaml_secret_findings(path: Path, relative: str) -> list[Finding]:
+    findings = []
+    try:
+        with path.open("r", encoding="utf-8-sig") as file:
+            for line_number, text in enumerate(file, start=1):
+                match = re.match(r"^\s*(?:-\s*)?([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$", text)
+                if not match:
+                    match = re.match(r"^\s*-\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$", text)
+                if not match or not is_secret_setting(match.group(1)):
+                    continue
+                value = match.group(2).strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                    value = value[1:-1].strip()
+                if (
+                    not value
+                    or value.lower() in {"null", "~", "|", ">"}
+                    or value.startswith(("#", "!"))
+                    or re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", value)
+                ):
+                    continue
+                findings.append(make_finding(
+                    "HARDCODED_SECRET", f"строковое значение поля {match.group(1)}", relative, line_number, "medium"
+                ))
+    except (OSError, UnicodeError) as error:
+        return [make_finding("SCAN_ERROR", f"не удалось прочитать YAML-файл: {error}", relative)]
     return findings
 
 
@@ -191,10 +247,14 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
         relative = path.relative_to(project).as_posix()
         if has_sensitive_name(path):
             findings.append(make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", relative, confidence="medium"))
+            if path.name.lower() == ".env" or path.name.lower().startswith(".env."):
+                findings.extend(dotenv_secret_findings(path, relative))
         if path.name in {"settings.py", "config.py"}:
             findings.extend(python_secret_findings(path, relative))
         if path.name in CONFIG_FILE_NAMES:
             findings.extend(config_secret_findings(path, relative))
+        if path.name in YAML_CONFIG_NAMES:
+            findings.extend(yaml_secret_findings(path, relative))
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
             findings.append(make_finding("TEMP", "временный файл", relative, confidence="medium"))
         try:

@@ -235,8 +235,44 @@ class ScanTests(unittest.TestCase):
     def test_environment_template_is_not_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
-            (project / ".env.example").write_text("TOKEN=\n")
+            (project / ".env.example").write_text("TOKEN=example\n")
             self.assertFalse(any(item.startswith("SENSITIVE:") for item in scan(project)))
+            self.assertFalse(any(item.startswith("HARDCODED_SECRET:") for item in scan(project)))
+
+    def test_dotenv_secret_is_reported_with_line_without_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".env").write_text('APP_NAME=demo\nexport API_TOKEN=private-example\nPASSWORD=\n')
+            findings = scan(project)
+            self.assertIn("HARDCODED_SECRET: заполненная переменная API_TOKEN .env:2", findings)
+            self.assertFalse(any("private-example" in item for item in findings))
+            self.assertFalse(any("PASSWORD" in item for item in findings))
+
+    def test_dotenv_variable_reference_is_not_hardcoded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".env.local").write_text("API_TOKEN=${TOKEN_FROM_ENV}\n")
+            self.assertFalse(any(item.startswith("HARDCODED_SECRET:") for item in scan(project)))
+
+    def test_yaml_secret_is_reported_without_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "application.yaml").write_text('database:\n  password: "private-example"\n')
+            findings = scan(project)
+            self.assertIn("HARDCODED_SECRET: строковое значение поля password application.yaml:2", findings)
+            self.assertFalse(any("private-example" in item for item in findings))
+
+    def test_compose_environment_secret_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "compose.yml").write_text('services:\n  app:\n    environment:\n      - API_TOKEN=example\n')
+            self.assertIn("HARDCODED_SECRET: строковое значение поля API_TOKEN compose.yml:4", scan(project))
+
+    def test_yaml_environment_reference_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "config.yml").write_text('secret-key: "${SECRET_FROM_ENV}"\n')
+            self.assertFalse(any(item.startswith("HARDCODED_SECRET:") for item in scan(project)))
 
     def test_gitignored_sensitive_file_is_not_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
