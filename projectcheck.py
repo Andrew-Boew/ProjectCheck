@@ -11,6 +11,7 @@ import tokenize
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 DEFAULT_MAX_SIZE_MIB = 10
+CONTENT_SCAN_BYTES = 2 * 1024 * 1024
 TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
@@ -20,6 +21,7 @@ YAML_CONFIG_NAMES = {
     "settings.yml", "settings.yaml", "config.yml", "config.yaml", "application.yml", "application.yaml",
     "compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml", "values.yml", "values.yaml",
 }
+PRIVATE_KEY_HEADER = re.compile(rb"^-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----$")
 Finding = dict[str, str | int | None]
 
 
@@ -156,6 +158,20 @@ def yaml_secret_findings(path: Path, relative: str) -> list[Finding]:
     return findings
 
 
+def private_key_findings(path: Path, relative: str) -> list[Finding]:
+    try:
+        with path.open("rb") as file:
+            content = file.read(CONTENT_SCAN_BYTES)
+    except OSError as error:
+        return [make_finding("SCAN_ERROR", f"не удалось прочитать файл: {error}", relative)]
+
+    findings = []
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        if PRIVATE_KEY_HEADER.fullmatch(line.strip()):
+            findings.append(make_finding("PRIVATE_KEY_BLOCK", "найден заголовок приватного ключа", relative, line_number))
+    return findings
+
+
 def is_excluded(relative: str, patterns: tuple[str, ...]) -> bool:
     for pattern in patterns:
         if pattern.endswith("/"):
@@ -200,6 +216,40 @@ def git_project_files(project: Path, excludes: tuple[str, ...]) -> list[Path] | 
     return sorted(files)
 
 
+def staged_mismatch_findings(project: Path, excludes: tuple[str, ...]) -> list[Finding]:
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True,
+        )
+        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
+            return []
+        staged = subprocess.run(
+            ["git", "-C", str(project), "diff", "--cached", "--name-only", "-z", "--"],
+            capture_output=True,
+        )
+        worktree = subprocess.run(
+            ["git", "-C", str(project), "diff", "--name-only", "-z", "--"],
+            capture_output=True,
+        )
+    except OSError:
+        return []
+    if staged.returncode != 0 or worktree.returncode != 0:
+        return [make_finding("SCAN_ERROR", "не удалось сравнить подготовленные файлы с файлами на диске")]
+
+    staged_paths = set(staged.stdout.split(b"\0"))
+    worktree_paths = set(worktree.stdout.split(b"\0"))
+    findings = []
+    for raw_path in sorted((staged_paths & worktree_paths) - {b""}):
+        relative = Path(os.fsdecode(raw_path)).as_posix()
+        if any(part in IGNORED_DIRS for part in Path(relative).parts) or is_excluded(relative, excludes):
+            continue
+        findings.append(make_finding(
+            "SCAN_ERROR", "подготовленная версия отличается от файла на диске; содержимое коммита не проверено", relative,
+        ))
+    return findings
+
+
 def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Finding] | None = None) -> list[Path]:
     git_files = git_project_files(project, excludes)
     if git_files is not None:
@@ -233,6 +283,7 @@ def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Fi
 def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[Finding]:
     findings: list[Finding] = []
     files = project_files(project, excludes, findings)
+    findings.extend(staged_mismatch_findings(project, excludes))
     if not any((project / name).is_file() for name in ("README.md", "README.rst", "README.txt")):
         findings.append(make_finding("README", "добавьте описание проекта"))
     if not (project / ".gitignore").is_file():
@@ -245,6 +296,7 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
 
     for path in files:
         relative = path.relative_to(project).as_posix()
+        findings.extend(private_key_findings(path, relative))
         if has_sensitive_name(path):
             findings.append(make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", relative, confidence="medium"))
             if path.name.lower() == ".env" or path.name.lower().startswith(".env."):

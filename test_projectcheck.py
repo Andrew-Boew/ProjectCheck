@@ -197,6 +197,22 @@ class ScanTests(unittest.TestCase):
             self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл .env.local", findings)
             self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл keys/id_ed25519", findings)
 
+    def test_private_key_header_is_found_inside_text_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            header = "-----BEGIN " + "PRIVATE KEY-----"
+            (project / "notes.txt").write_text("heading\n" + header + "\nsecret-body\n")
+            findings = scan(project)
+            self.assertIn("PRIVATE_KEY_BLOCK: найден заголовок приватного ключа notes.txt:2", findings)
+            self.assertFalse(any("secret-body" in item for item in findings))
+
+    def test_public_key_header_is_not_reported_as_private(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            header = "-----BEGIN " + "PUBLIC KEY-----"
+            (project / "public.pem").write_text(header + "\n")
+            self.assertFalse(any(item.startswith("PRIVATE_KEY_BLOCK:") for item in scan(project)))
+
     def test_hardcoded_settings_are_reported_without_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -290,6 +306,23 @@ class ScanTests(unittest.TestCase):
             (project / ".env").write_text("TOKEN=example\n")
             subprocess.run(["git", "-C", directory, "add", "-f", ".env"], check=True)
             self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл .env", scan(project))
+
+    def test_staged_content_different_from_worktree_is_scan_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            config = project / "config.py"
+            config.write_text('SECRET_KEY = "staged-value"\n')
+            subprocess.run(["git", "-C", directory, "add", "config.py"], check=True)
+            config.write_text('SECRET_KEY = os.getenv("SECRET_KEY")\n')
+
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("SCAN_ERROR: подготовленная версия отличается от файла на диске; содержимое коммита не проверено config.py", result.stdout)
+            self.assertNotIn("staged-value", result.stdout)
 
     def test_json_report_contains_findings_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
