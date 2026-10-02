@@ -1,0 +1,33 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from projectcheck import scan
+
+
+class ScanTests(unittest.TestCase):
+    def test_empty_project_has_three_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(len(scan(Path(directory))), 3)
+
+    def test_complete_project_has_no_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "README.md").write_text("Project")
+            (project / ".gitignore").write_text(".venv/\n")
+            tests = project / "tests"
+            tests.mkdir()
+            (tests / "test_example.py").write_text("def test_example(): pass\n")
+            self.assertEqual(scan(project), [])
+
+    def test_venv_tests_do_not_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            venv = project / ".venv"
+            venv.mkdir()
+            (venv / "test_dependency.py").write_text("pass\n")
+            self.assertTrue(any(item.startswith("TESTS:") for item in scan(project)))
+
+
+if __name__ == "__main__":
+    unittest.main()
