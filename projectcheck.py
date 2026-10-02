@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def scan(project: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка локального проекта")
     parser.add_argument("project", type=Path, help="путь к проекту")
+    parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
     args = parser.parse_args()
 
     project = args.project.expanduser().resolve()
@@ -68,6 +70,10 @@ def main() -> int:
         parser.error(f"папка не найдена: {project}")
 
     findings = scan(project)
+    if args.format == "json":
+        print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
+        return 0
+
     if findings:
         for finding in findings:
             print(f"- {finding}")

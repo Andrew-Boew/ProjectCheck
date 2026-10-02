@@ -1,7 +1,11 @@
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import projectcheck
 from projectcheck import scan
 
 
@@ -65,6 +69,19 @@ class ScanTests(unittest.TestCase):
             project = Path(directory)
             (project / ".env.example").write_text("TOKEN=\n")
             self.assertFalse(any(item.startswith("SENSITIVE:") for item in scan(project)))
+
+    def test_json_report_contains_findings_and_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--format", "json"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["project"], str(Path(directory).resolve()))
+            self.assertEqual(report["count"], 3)
+            self.assertEqual(len(report["findings"]), report["count"])
 
 
 if __name__ == "__main__":
