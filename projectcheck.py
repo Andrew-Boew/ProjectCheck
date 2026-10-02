@@ -1,16 +1,19 @@
 import argparse
+import ast
 from fnmatch import fnmatchcase
 import json
 import os
 from pathlib import Path
 import subprocess
 import tomllib
+import tokenize
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 DEFAULT_MAX_SIZE_MIB = 10
 TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
+SECRET_SETTING_SUFFIXES = ("SECRET", "SECRET_KEY", "PASSWORD", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL", "CREDENTIALS")
 Finding = dict[str, str | None]
 
 
@@ -24,6 +27,40 @@ def has_sensitive_name(path: Path) -> bool:
     return (
         (name == ".env" or name.startswith(".env.")) and name not in ENV_TEMPLATES
     ) or name in PRIVATE_KEY_NAMES or path.suffix.lower() in {".key", ".p12", ".pfx"}
+
+
+def is_secret_setting(name: str) -> bool:
+    upper = name.upper()
+    return any(upper == suffix or upper.endswith(f"_{suffix}") for suffix in SECRET_SETTING_SUFFIXES)
+
+
+def python_secret_findings(path: Path, relative: str) -> list[Finding]:
+    try:
+        with tokenize.open(path) as file:
+            tree = ast.parse(file.read(), filename=relative)
+    except SyntaxError:
+        return []
+    except (OSError, UnicodeError) as error:
+        return [{"code": "SCAN_ERROR", "message": f"не удалось прочитать Python-файл: {error}", "path": relative}]
+
+    findings = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str) or not node.value.value.strip():
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and is_secret_setting(target.id):
+                findings.append({
+                    "code": "HARDCODED_SECRET",
+                    "message": f"строковый литерал в {target.id} (строка {node.lineno})",
+                    "path": relative,
+                })
+    return findings
 
 
 def is_excluded(relative: str, patterns: tuple[str, ...]) -> bool:
@@ -70,13 +107,27 @@ def git_project_files(project: Path, excludes: tuple[str, ...]) -> list[Path] | 
     return sorted(files)
 
 
-def project_files(project: Path, excludes: tuple[str, ...] = ()) -> list[Path]:
+def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Finding] | None = None) -> list[Path]:
     git_files = git_project_files(project, excludes)
     if git_files is not None:
         return git_files
 
+    def on_walk_error(error: OSError) -> None:
+        relative = None
+        if error.filename:
+            try:
+                relative = Path(error.filename).resolve().relative_to(project.resolve()).as_posix()
+            except ValueError:
+                pass
+        if errors is not None:
+            errors.append({
+                "code": "SCAN_ERROR",
+                "message": f"не удалось прочитать папку: {error.strerror or error}",
+                "path": relative,
+            })
+
     files = []
-    for directory, subdirs, names in os.walk(project):
+    for directory, subdirs, names in os.walk(project, onerror=on_walk_error):
         subdirs[:] = sorted(
             name for name in subdirs
             if name not in IGNORED_DIRS
@@ -92,7 +143,7 @@ def project_files(project: Path, excludes: tuple[str, ...] = ()) -> list[Path]:
 
 def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[Finding]:
     findings: list[Finding] = []
-    files = project_files(project, excludes)
+    files = project_files(project, excludes, findings)
     if not any((project / name).is_file() for name in ("README.md", "README.rst", "README.txt")):
         findings.append({"code": "README", "message": "добавьте описание проекта", "path": None})
     if not (project / ".gitignore").is_file():
@@ -107,6 +158,8 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
         relative = path.relative_to(project).as_posix()
         if has_sensitive_name(path):
             findings.append({"code": "SENSITIVE", "message": "проверьте потенциально конфиденциальный файл", "path": relative})
+        if path.name in {"settings.py", "config.py"}:
+            findings.extend(python_secret_findings(path, relative))
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
             findings.append({"code": "TEMP", "message": "временный файл", "path": relative})
         try:

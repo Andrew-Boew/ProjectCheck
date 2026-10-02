@@ -62,6 +62,25 @@ class ScanTests(unittest.TestCase):
                 "path": "blocked.bin",
             }, findings)
 
+    def test_unreadable_directory_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            blocked = project / "private"
+
+            def walk_with_error(root: Path, onerror: object) -> object:
+                onerror(PermissionError(13, "Permission denied", str(blocked)))
+                return iter(())
+
+            with patch("projectcheck.git_project_files", return_value=None), patch(
+                "projectcheck.os.walk", side_effect=walk_with_error
+            ):
+                findings = projectcheck.scan_details(project)
+            self.assertIn({
+                "code": "SCAN_ERROR",
+                "message": "не удалось прочитать папку: Permission denied",
+                "path": "private",
+            }, findings)
+
     def test_scan_error_returns_two_without_fail_flag(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             error = {"code": "SCAN_ERROR", "message": "не удалось прочитать файл", "path": "blocked.bin"}
@@ -181,6 +200,21 @@ class ScanTests(unittest.TestCase):
             findings = scan(project)
             self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл .env.local", findings)
             self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл keys/id_ed25519", findings)
+
+    def test_hardcoded_settings_are_reported_without_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "settings.py").write_text('SECRET_KEY = "private-example"\nPOSTGRES_PASSWORD: str = "demo"\n')
+            findings = scan(project)
+            self.assertIn("HARDCODED_SECRET: строковый литерал в SECRET_KEY (строка 1) settings.py", findings)
+            self.assertIn("HARDCODED_SECRET: строковый литерал в POSTGRES_PASSWORD (строка 2) settings.py", findings)
+            self.assertFalse(any("private-example" in item for item in findings))
+
+    def test_environment_based_setting_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "config.py").write_text('import os\nSECRET_KEY = os.getenv("SECRET_KEY")\n')
+            self.assertFalse(any(item.startswith("HARDCODED_SECRET:") for item in scan(project)))
 
     def test_environment_template_is_not_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
