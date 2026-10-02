@@ -28,6 +28,27 @@ class ScanTests(unittest.TestCase):
             (venv / "test_dependency.py").write_text("pass\n")
             self.assertTrue(any(item.startswith("TESTS:") for item in scan(project)))
 
+    def test_large_file_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            with (project / "video.mov").open("wb") as file:
+                file.truncate(10 * 1024 * 1024 + 1)
+            self.assertIn("LARGE: файл больше 10 МиБ video.mov", scan(project))
+
+    def test_temporary_file_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "notes.txt.bak").write_text("backup")
+            self.assertIn("TEMP: временный файл notes.txt.bak", scan(project))
+
+    def test_ignored_directory_is_not_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            cache = project / "node_modules"
+            cache.mkdir()
+            (cache / "artifact.tmp").write_text("generated")
+            self.assertFalse(any(item.startswith("TEMP:") for item in scan(project)))
+
 
 if __name__ == "__main__":
     unittest.main()
