@@ -1,4 +1,5 @@
 import argparse
+from fnmatch import fnmatchcase
 import json
 import os
 from pathlib import Path
@@ -17,23 +18,35 @@ def has_sensitive_name(path: Path) -> bool:
     ) or name in PRIVATE_KEY_NAMES or path.suffix.lower() in {".key", ".p12", ".pfx"}
 
 
-def project_files(project: Path) -> list[Path]:
+def is_excluded(relative: str, patterns: tuple[str, ...]) -> bool:
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            if relative == pattern.rstrip("/") or relative.startswith(pattern):
+                return True
+        elif fnmatchcase(relative, pattern):
+            return True
+    return False
+
+
+def project_files(project: Path, excludes: tuple[str, ...] = ()) -> list[Path]:
     files = []
     for directory, subdirs, names in os.walk(project):
         subdirs[:] = sorted(
             name for name in subdirs
-            if name not in IGNORED_DIRS and not (Path(directory) / name).is_symlink()
+            if name not in IGNORED_DIRS
+            and not (Path(directory) / name).is_symlink()
+            and not is_excluded((Path(directory) / name).relative_to(project).as_posix(), excludes)
         )
         for name in sorted(names):
             path = Path(directory) / name
-            if path.is_file() and not path.is_symlink():
+            if path.is_file() and not path.is_symlink() and not is_excluded(path.relative_to(project).as_posix(), excludes):
                 files.append(path)
     return files
 
 
-def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB) -> list[str]:
+def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[str]:
     findings = []
-    files = project_files(project)
+    files = project_files(project, excludes)
     if not any((project / name).is_file() for name in ("README.md", "README.rst", "README.txt")):
         findings.append("README: добавьте описание проекта")
     if not (project / ".gitignore").is_file():
@@ -65,6 +78,7 @@ def main() -> int:
     parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
     parser.add_argument("--fail-on-findings", action="store_true", help="код 1 при наличии замечаний")
     parser.add_argument("--max-size-mib", type=int, default=DEFAULT_MAX_SIZE_MIB, help="порог большого файла в МиБ")
+    parser.add_argument("--exclude", action="append", default=[], metavar="PATTERN", help="исключить путь или шаблон")
     args = parser.parse_args()
 
     if args.max_size_mib <= 0:
@@ -74,7 +88,7 @@ def main() -> int:
     if not project.is_dir():
         parser.error(f"папка не найдена: {project}")
 
-    findings = scan(project, max_size_mib=args.max_size_mib)
+    findings = scan(project, max_size_mib=args.max_size_mib, excludes=tuple(args.exclude))
     exit_code = 1 if args.fail_on_findings and findings else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))

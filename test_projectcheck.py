@@ -76,6 +76,29 @@ class ScanTests(unittest.TestCase):
             (cache / "artifact.tmp").write_text("generated")
             self.assertFalse(any(item.startswith("TEMP:") for item in scan(project)))
 
+    def test_exclude_glob_skips_matching_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "notes.bak").write_text("temporary")
+            (project / "keep.tmp").write_text("temporary")
+            findings = scan(project, excludes=("*.bak",))
+            self.assertNotIn("TEMP: временный файл notes.bak", findings)
+            self.assertIn("TEMP: временный файл keep.tmp", findings)
+
+    def test_exclude_directory_skips_its_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            generated = project / "generated"
+            generated.mkdir()
+            (generated / "cache.tmp").write_text("temporary")
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--exclude", "generated/"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertNotIn("cache.tmp", result.stdout)
+
     def test_sensitive_file_names_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
