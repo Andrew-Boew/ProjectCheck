@@ -39,6 +39,29 @@ class ScanTests(unittest.TestCase):
                 file.truncate(10 * 1024 * 1024 + 1)
             self.assertIn("LARGE: файл больше 10 МиБ video.mov", scan(project))
 
+    def test_custom_size_limit_is_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            with (project / "archive.zip").open("wb") as file:
+                file.truncate(2 * 1024 * 1024)
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--max-size-mib", "1"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("LARGE: файл больше 1 МиБ archive.zip", result.stdout)
+
+    def test_size_limit_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--max-size-mib", "0"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--max-size-mib должен быть положительным числом", result.stderr)
+
     def test_temporary_file_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

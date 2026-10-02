@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
-LARGE_FILE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_SIZE_MIB = 10
 TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
@@ -31,7 +31,7 @@ def project_files(project: Path) -> list[Path]:
     return files
 
 
-def scan(project: Path) -> list[str]:
+def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB) -> list[str]:
     findings = []
     files = project_files(project)
     if not any((project / name).is_file() for name in ("README.md", "README.rst", "README.txt")):
@@ -54,8 +54,8 @@ def scan(project: Path) -> list[str]:
             size = path.stat().st_size
         except OSError:
             continue
-        if size > LARGE_FILE_BYTES:
-            findings.append(f"LARGE: файл больше 10 МиБ {relative}")
+        if size > max_size_mib * 1024 * 1024:
+            findings.append(f"LARGE: файл больше {max_size_mib} МиБ {relative}")
     return findings
 
 
@@ -64,13 +64,17 @@ def main() -> int:
     parser.add_argument("project", type=Path, help="путь к проекту")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
     parser.add_argument("--fail-on-findings", action="store_true", help="код 1 при наличии замечаний")
+    parser.add_argument("--max-size-mib", type=int, default=DEFAULT_MAX_SIZE_MIB, help="порог большого файла в МиБ")
     args = parser.parse_args()
+
+    if args.max_size_mib <= 0:
+        parser.error("--max-size-mib должен быть положительным числом")
 
     project = args.project.expanduser().resolve()
     if not project.is_dir():
         parser.error(f"папка не найдена: {project}")
 
-    findings = scan(project)
+    findings = scan(project, max_size_mib=args.max_size_mib)
     exit_code = 1 if args.fail_on_findings and findings else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
