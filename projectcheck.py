@@ -63,6 +63,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка локального проекта")
     parser.add_argument("project", type=Path, help="путь к проекту")
     parser.add_argument("--format", choices=("text", "json"), default="text", help="формат отчёта")
+    parser.add_argument("--fail-on-findings", action="store_true", help="код 1 при наличии замечаний")
     args = parser.parse_args()
 
     project = args.project.expanduser().resolve()
@@ -70,9 +71,10 @@ def main() -> int:
         parser.error(f"папка не найдена: {project}")
 
     findings = scan(project)
+    exit_code = 1 if args.fail_on_findings and findings else 0
     if args.format == "json":
         print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
-        return 0
+        return exit_code
 
     if findings:
         for finding in findings:
@@ -80,7 +82,7 @@ def main() -> int:
         print(f"Найдено замечаний: {len(findings)}")
     else:
         print("Замечаний не найдено")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

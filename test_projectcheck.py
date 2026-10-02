@@ -83,6 +83,30 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(report["count"], 3)
             self.assertEqual(len(report["findings"]), report["count"])
 
+    def test_fail_on_findings_returns_one_with_json_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--format", "json", "--fail-on-findings"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)["count"], 3)
+
+    def test_fail_on_findings_returns_zero_for_clean_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "README.md").write_text("Project")
+            (project / ".gitignore").write_text(".venv/\n")
+            (project / "test_example.py").write_text("pass\n")
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--fail-on-findings"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("Замечаний не найдено", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
