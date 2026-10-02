@@ -56,11 +56,9 @@ class ScanTests(unittest.TestCase):
 
             with patch("projectcheck.project_files", return_value=[target]), patch.object(Path, "stat", stat_with_error):
                 findings = projectcheck.scan_details(project)
-            self.assertIn({
-                "code": "SCAN_ERROR",
-                "message": "не удалось получить размер файла: access denied",
-                "path": "blocked.bin",
-            }, findings)
+            self.assertIn(projectcheck.make_finding(
+                "SCAN_ERROR", "не удалось получить размер файла: access denied", "blocked.bin"
+            ), findings)
 
     def test_unreadable_directory_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -75,15 +73,13 @@ class ScanTests(unittest.TestCase):
                 "projectcheck.os.walk", side_effect=walk_with_error
             ):
                 findings = projectcheck.scan_details(project)
-            self.assertIn({
-                "code": "SCAN_ERROR",
-                "message": "не удалось прочитать папку: Permission denied",
-                "path": "private",
-            }, findings)
+            self.assertIn(projectcheck.make_finding(
+                "SCAN_ERROR", "не удалось прочитать папку: Permission denied", "private"
+            ), findings)
 
     def test_scan_error_returns_two_without_fail_flag(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            error = {"code": "SCAN_ERROR", "message": "не удалось прочитать файл", "path": "blocked.bin"}
+            error = projectcheck.make_finding("SCAN_ERROR", "не удалось прочитать файл", "blocked.bin")
             with patch("projectcheck.scan_details", return_value=[error]), patch.object(
                 sys, "argv", ["projectcheck.py", directory]
             ), redirect_stdout(io.StringIO()):
@@ -206,8 +202,8 @@ class ScanTests(unittest.TestCase):
             project = Path(directory)
             (project / "settings.py").write_text('SECRET_KEY = "private-example"\nPOSTGRES_PASSWORD: str = "demo"\n')
             findings = scan(project)
-            self.assertIn("HARDCODED_SECRET: строковый литерал в SECRET_KEY (строка 1) settings.py", findings)
-            self.assertIn("HARDCODED_SECRET: строковый литерал в POSTGRES_PASSWORD (строка 2) settings.py", findings)
+            self.assertIn("HARDCODED_SECRET: строковый литерал в SECRET_KEY settings.py:1", findings)
+            self.assertIn("HARDCODED_SECRET: строковый литерал в POSTGRES_PASSWORD settings.py:2", findings)
             self.assertFalse(any("private-example" in item for item in findings))
 
     def test_environment_based_setting_is_not_reported(self) -> None:
@@ -252,7 +248,8 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(report["count"], 3)
             self.assertEqual(len(report["findings"]), report["count"])
             self.assertEqual(report["findings"][0], {
-                "code": "README", "message": "добавьте описание проекта", "path": None
+                "code": "README", "message": "добавьте описание проекта", "path": None,
+                "line": None, "confidence": "high",
             })
 
     def test_json_finding_has_relative_file_path(self) -> None:
@@ -270,6 +267,27 @@ class ScanTests(unittest.TestCase):
                 "code": "SENSITIVE",
                 "message": "проверьте потенциально конфиденциальный файл",
                 "path": ".env",
+                "line": None,
+                "confidence": "medium",
+            }, findings)
+
+    def test_json_secret_finding_has_line_and_confidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "settings.py").write_text('SECRET_KEY = "example"\n')
+            result = subprocess.run(
+                [sys.executable, projectcheck.__file__, directory, "--format", "json"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            findings = json.loads(result.stdout)["findings"]
+            self.assertIn({
+                "code": "HARDCODED_SECRET",
+                "message": "строковый литерал в SECRET_KEY",
+                "path": "settings.py",
+                "line": 1,
+                "confidence": "medium",
             }, findings)
 
     def test_fail_on_findings_returns_one_with_json_report(self) -> None:

@@ -14,11 +14,17 @@ TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
 PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
 ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
 SECRET_SETTING_SUFFIXES = ("SECRET", "SECRET_KEY", "PASSWORD", "TOKEN", "API_KEY", "PRIVATE_KEY", "CREDENTIAL", "CREDENTIALS")
-Finding = dict[str, str | None]
+Finding = dict[str, str | int | None]
+
+
+def make_finding(code: str, message: str, path: str | None = None, line: int | None = None, confidence: str = "high") -> Finding:
+    return {"code": code, "message": message, "path": path, "line": line, "confidence": confidence}
 
 
 def format_finding(item: Finding) -> str:
     path = f" {item['path']}" if item["path"] else ""
+    if path and item["line"] is not None:
+        path += f":{item['line']}"
     return f"{item['code']}: {item['message']}{path}"
 
 
@@ -41,7 +47,7 @@ def python_secret_findings(path: Path, relative: str) -> list[Finding]:
     except SyntaxError:
         return []
     except (OSError, UnicodeError) as error:
-        return [{"code": "SCAN_ERROR", "message": f"не удалось прочитать Python-файл: {error}", "path": relative}]
+        return [make_finding("SCAN_ERROR", f"не удалось прочитать Python-файл: {error}", relative)]
 
     findings = []
     for node in tree.body:
@@ -55,11 +61,9 @@ def python_secret_findings(path: Path, relative: str) -> list[Finding]:
             continue
         for target in targets:
             if isinstance(target, ast.Name) and is_secret_setting(target.id):
-                findings.append({
-                    "code": "HARDCODED_SECRET",
-                    "message": f"строковый литерал в {target.id} (строка {node.lineno})",
-                    "path": relative,
-                })
+                findings.append(make_finding(
+                    "HARDCODED_SECRET", f"строковый литерал в {target.id}", relative, node.lineno, "medium"
+                ))
     return findings
 
 
@@ -120,11 +124,7 @@ def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Fi
             except ValueError:
                 pass
         if errors is not None:
-            errors.append({
-                "code": "SCAN_ERROR",
-                "message": f"не удалось прочитать папку: {error.strerror or error}",
-                "path": relative,
-            })
+            errors.append(make_finding("SCAN_ERROR", f"не удалось прочитать папку: {error.strerror or error}", relative))
 
     files = []
     for directory, subdirs, names in os.walk(project, onerror=on_walk_error):
@@ -145,30 +145,30 @@ def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclud
     findings: list[Finding] = []
     files = project_files(project, excludes, findings)
     if not any((project / name).is_file() for name in ("README.md", "README.rst", "README.txt")):
-        findings.append({"code": "README", "message": "добавьте описание проекта", "path": None})
+        findings.append(make_finding("README", "добавьте описание проекта"))
     if not (project / ".gitignore").is_file():
-        findings.append({"code": "GITIGNORE", "message": "добавьте .gitignore", "path": None})
+        findings.append(make_finding("GITIGNORE", "добавьте .gitignore"))
     if not any(
         path.suffix == ".py" and (path.name.startswith("test_") or path.stem.endswith("_test"))
         for path in files
     ):
-        findings.append({"code": "TESTS", "message": "тесты не найдены", "path": None})
+        findings.append(make_finding("TESTS", "тесты не найдены", confidence="low"))
 
     for path in files:
         relative = path.relative_to(project).as_posix()
         if has_sensitive_name(path):
-            findings.append({"code": "SENSITIVE", "message": "проверьте потенциально конфиденциальный файл", "path": relative})
+            findings.append(make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", relative, confidence="medium"))
         if path.name in {"settings.py", "config.py"}:
             findings.extend(python_secret_findings(path, relative))
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
-            findings.append({"code": "TEMP", "message": "временный файл", "path": relative})
+            findings.append(make_finding("TEMP", "временный файл", relative, confidence="medium"))
         try:
             size = path.stat().st_size
         except OSError as error:
-            findings.append({"code": "SCAN_ERROR", "message": f"не удалось получить размер файла: {error}", "path": relative})
+            findings.append(make_finding("SCAN_ERROR", f"не удалось получить размер файла: {error}", relative))
             continue
         if size > max_size_mib * 1024 * 1024:
-            findings.append({"code": "LARGE", "message": f"файл больше {max_size_mib} МиБ", "path": relative})
+            findings.append(make_finding("LARGE", f"файл больше {max_size_mib} МиБ", relative))
     return findings
 
 
