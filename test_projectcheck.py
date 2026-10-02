@@ -49,6 +49,23 @@ class ScanTests(unittest.TestCase):
             (cache / "artifact.tmp").write_text("generated")
             self.assertFalse(any(item.startswith("TEMP:") for item in scan(project)))
 
+    def test_sensitive_file_names_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".env.local").write_text("TOKEN=example\n")
+            keys = project / "keys"
+            keys.mkdir()
+            (keys / "id_ed25519").write_text("example\n")
+            findings = scan(project)
+            self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл .env.local", findings)
+            self.assertIn("SENSITIVE: проверьте потенциально конфиденциальный файл keys/id_ed25519", findings)
+
+    def test_environment_template_is_not_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".env.example").write_text("TOKEN=\n")
+            self.assertFalse(any(item.startswith("SENSITIVE:") for item in scan(project)))
+
 
 if __name__ == "__main__":
     unittest.main()

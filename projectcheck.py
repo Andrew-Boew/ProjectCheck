@@ -5,6 +5,15 @@ from pathlib import Path
 IGNORED_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 LARGE_FILE_BYTES = 10 * 1024 * 1024
 TEMP_SUFFIXES = {".tmp", ".bak", ".swp", ".swo"}
+PRIVATE_KEY_NAMES = {"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
+ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
+
+
+def has_sensitive_name(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        (name == ".env" or name.startswith(".env.")) and name not in ENV_TEMPLATES
+    ) or name in PRIVATE_KEY_NAMES or path.suffix.lower() in {".key", ".p12", ".pfx"}
 
 
 def project_files(project: Path) -> list[Path]:
@@ -36,6 +45,8 @@ def scan(project: Path) -> list[str]:
 
     for path in files:
         relative = path.relative_to(project).as_posix()
+        if has_sensitive_name(path):
+            findings.append(f"SENSITIVE: проверьте потенциально конфиденциальный файл {relative}")
         if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
             findings.append(f"TEMP: временный файл {relative}")
         try:
