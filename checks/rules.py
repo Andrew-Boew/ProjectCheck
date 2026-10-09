@@ -21,6 +21,8 @@ from parsers.secrets import (
 
 
 class Check(ABC):
+    each_file = False
+
     @abstractmethod
     def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list[Finding]:
         raise NotImplementedError
@@ -46,13 +48,25 @@ class ProjectLevelCheck(Check):
         return findings
 
 
+class SensitiveCheck(Check):
+    each_file = True
+
+    def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list[Finding]:
+        findings: list[Finding] = []
+        for path in files:
+            if has_sensitive_name(path):
+                relative = path.relative_to(project).as_posix()
+                findings.append(make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", relative, confidence="medium"))
+        return findings
+
+
 class FileCheck(Check):
+    each_file = True
+
     def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list[Finding]:
         findings: list[Finding] = []
         for path in files:
             relative = path.relative_to(project).as_posix()
-            if has_sensitive_name(path):
-                findings.append(make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", relative, confidence="medium"))
             if path.suffix.lower() in TEMP_SUFFIXES or path.name.endswith("~") or path.name == ".DS_Store":
                 findings.append(make_finding("TEMP", "временный файл", relative, confidence="medium"))
             try:
@@ -66,6 +80,8 @@ class FileCheck(Check):
 
 
 class PrivateKeyCheck(Check):
+    each_file = True
+
     def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list[Finding]:
         findings: list[Finding] = []
         for path in files:
@@ -83,6 +99,8 @@ class PrivateKeyCheck(Check):
 
 
 class SecretCheck(Check):
+    each_file = True
+
     def __init__(self, parsers: tuple[SecretParser, ...] | None = None) -> None:
         self.parsers = parsers or (
             DotenvSecretParser(),
@@ -121,3 +139,14 @@ class DependencyCheck(Check):
             except (OSError, UnicodeError) as error:
                 findings.append(make_finding("SCAN_ERROR", f"не удалось прочитать зависимости: {error}", relative))
         return findings
+
+
+def default_checks() -> tuple[Check, ...]:
+    return (
+        ProjectLevelCheck(),
+        DependencyCheck(),
+        PrivateKeyCheck(),
+        SensitiveCheck(),
+        SecretCheck(),
+        FileCheck(),
+    )

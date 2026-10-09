@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from checks.rules import FileCheck, ProjectLevelCheck
+from checks.rules import Check, FileCheck, ProjectLevelCheck
 from model.finding import make_finding
 from model.report import Report
 from model.settings import Settings
@@ -141,6 +141,23 @@ class WorkspaceTests(unittest.TestCase):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_scanner_runs_checks_in_list_order(self) -> None:
+        class WholeProject(Check):
+            def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list:
+                return [make_finding("README", "сначала проект")]
+
+        class OneFile(Check):
+            each_file = True
+
+            def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list:
+                return [make_finding("TEMP", "потом файл", files[0].name)]
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "a.txt").write_text("x")
+            findings = Scanner(Settings(), checks=(WholeProject(), OneFile())).run(project)
+        self.assertEqual([item["code"] for item in findings], ["README", "TEMP"])
+
     def test_scanner_on_empty_directory_returns_five_project_findings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             findings = Scanner(Settings()).run(Path(directory))

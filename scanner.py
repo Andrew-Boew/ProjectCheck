@@ -1,7 +1,7 @@
 from pathlib import Path
 from collections.abc import Callable
 
-from checks.rules import Check, DependencyCheck, FileCheck, PrivateKeyCheck, ProjectLevelCheck, SecretCheck
+from checks.rules import Check, default_checks
 from model.finding import Finding
 from model.settings import Settings
 
@@ -15,13 +15,7 @@ class Scanner:
         mismatch_findings: Callable[..., list[Finding]] | None = None,
     ) -> None:
         self.settings = settings
-        self.checks = checks or (
-            ProjectLevelCheck(),
-            DependencyCheck(),
-            PrivateKeyCheck(),
-            FileCheck(),
-            SecretCheck(),
-        )
+        self.checks = checks or default_checks()
         self.list_files = list_files
         self.mismatch_findings = mismatch_findings
 
@@ -38,15 +32,13 @@ class Scanner:
         findings: list[Finding] = []
         files = list_files(project, self.settings.exclude, findings)
         findings.extend(mismatch_findings(project, self.settings.exclude))
-        by_type = {type(check): check for check in self.checks}
         limit = self.settings.max_size_mib
-        findings.extend(by_type[ProjectLevelCheck].apply(project, files, limit))
-        findings.extend(by_type[DependencyCheck].apply(project, files, limit))
+        once = [check for check in self.checks if not check.each_file]
+        per_file = [check for check in self.checks if check.each_file]
+        for check in once:
+            findings.extend(check.apply(project, files, limit))
         for path in files:
             one = [path]
-            findings.extend(by_type[PrivateKeyCheck].apply(project, one, limit))
-            file_findings = by_type[FileCheck].apply(project, one, limit)
-            findings.extend(item for item in file_findings if item["code"] == "SENSITIVE")
-            findings.extend(by_type[SecretCheck].apply(project, one, limit))
-            findings.extend(item for item in file_findings if item["code"] != "SENSITIVE")
+            for check in per_file:
+                findings.extend(check.apply(project, one, limit))
         return findings

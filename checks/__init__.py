@@ -1,4 +1,4 @@
-from checks.rules import Check, DependencyCheck, FileCheck, PrivateKeyCheck, ProjectLevelCheck, SecretCheck
+from checks.rules import Check, DependencyCheck, FileCheck, PrivateKeyCheck, ProjectLevelCheck, SecretCheck, SensitiveCheck
 
 __all__ = [
     "Check",
@@ -7,4 +7,5 @@ __all__ = [
     "PrivateKeyCheck",
     "ProjectLevelCheck",
     "SecretCheck",
+    "SensitiveCheck",
 ]
