@@ -427,7 +427,12 @@ class ScanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             subprocess.run(["git", "init", "-q", directory], check=True)
+            source = Path(projectcheck.__file__).parent
             shutil.copy2(projectcheck.__file__, project / "projectcheck.py")
+            for name in ("constants.py", "scanner.py"):
+                shutil.copy2(source / name, project / name)
+            for folder in ("model", "checks", "parsers", "workspace"):
+                shutil.copytree(source / folder, project / folder, ignore=shutil.ignore_patterns("__pycache__"))
             hooks = project / ".githooks"
             hooks.mkdir()
             hook = hooks / "pre-commit"
