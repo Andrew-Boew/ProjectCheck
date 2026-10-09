@@ -333,158 +333,225 @@ def is_excluded(relative: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def git_project_files(project: Path, excludes: tuple[str, ...]) -> list[Path] | None:
-    try:
-        root = subprocess.run(
-            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-        )
-        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
-            return None
-        result = subprocess.run(
-            ["git", "-C", str(project), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-            capture_output=True,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
+class GitWorkspace:
+    def __init__(self, root: Path) -> None:
+        self.root = root
 
-    files = []
-    for raw_path in result.stdout.split(b"\0"):
-        if not raw_path:
-            continue
-        relative = os.fsdecode(raw_path)
-        path = project / relative
-        if (
-            path.is_file()
-            and not path.is_symlink()
-            and not any(part in IGNORED_DIRS for part in Path(relative).parts)
-            and not is_excluded(Path(relative).as_posix(), excludes)
-        ):
-            files.append(path)
-    return sorted(files)
+    def list_files(self, excludes: tuple[str, ...]) -> list[Path] | None:
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+            )
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+                return None
+            result = subprocess.run(
+                ["git", "-C", str(self.root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                capture_output=True,
+            )
+        except OSError:
+            return None
+        if result.returncode != 0:
+            return None
+
+        files = []
+        for raw_path in result.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            relative = os.fsdecode(raw_path)
+            path = self.root / relative
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and not any(part in IGNORED_DIRS for part in Path(relative).parts)
+                and not is_excluded(Path(relative).as_posix(), excludes)
+            ):
+                files.append(path)
+        return sorted(files)
+
+    def mismatch_findings(self, excludes: tuple[str, ...]) -> list[Finding]:
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True,
+            )
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+                return []
+            staged = subprocess.run(
+                ["git", "-C", str(self.root), "diff", "--cached", "--name-only", "-z", "--"],
+                capture_output=True,
+            )
+            worktree = subprocess.run(
+                ["git", "-C", str(self.root), "diff", "--name-only", "-z", "--"],
+                capture_output=True,
+            )
+        except OSError:
+            return []
+        if staged.returncode != 0 or worktree.returncode != 0:
+            return [make_finding("SCAN_ERROR", "не удалось сравнить подготовленные файлы с файлами на диске")]
+
+        staged_paths = set(staged.stdout.split(b"\0"))
+        worktree_paths = set(worktree.stdout.split(b"\0"))
+        findings: list[Finding] = []
+        for raw_path in sorted((staged_paths & worktree_paths) - {b""}):
+            relative = Path(os.fsdecode(raw_path)).as_posix()
+            if any(part in IGNORED_DIRS for part in Path(relative).parts) or is_excluded(relative, excludes):
+                continue
+            findings.append(make_finding(
+                "SCAN_ERROR", "подготовленная версия отличается от файла на диске; содержимое коммита не проверено", relative,
+            ))
+        return findings
+
+    def export_staged(self, destination: Path) -> None:
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True,
+            )
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+                raise ValueError("--staged требует корень Git-репозитория")
+            entries = subprocess.run(
+                ["git", "-C", str(self.root), "ls-files", "--stage", "-z"], capture_output=True,
+            )
+            if entries.returncode != 0:
+                raise ValueError("не удалось получить список подготовленных файлов")
+            for entry in entries.stdout.split(b"\0"):
+                if not entry:
+                    continue
+                metadata, raw_path = entry.split(b"\t", 1)
+                mode, blob_id, stage = metadata.split()
+                if stage != b"0":
+                    raise ValueError("в Git index есть неразрешённые конфликты")
+                relative = Path(os.fsdecode(raw_path))
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError("в Git index найден недопустимый путь")
+                if mode != b"100644" and mode != b"100755":
+                    continue
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("wb") as file:
+                    content = subprocess.run(
+                        ["git", "-C", str(self.root), "cat-file", "blob", blob_id.decode("ascii")],
+                        stdout=file, stderr=subprocess.PIPE,
+                    )
+                if content.returncode != 0:
+                    raise ValueError(f"не удалось прочитать подготовленный файл: {relative.as_posix()}")
+        except OSError as error:
+            raise ValueError(f"не удалось прочитать Git index: {error}") from error
+
+    def install_hook(self) -> Path:
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True,
+            )
+            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+                raise ValueError("установка hook требует корень Git-репозитория")
+            configured = subprocess.run(
+                ["git", "-C", str(self.root), "config", "--path", "--get", "core.hooksPath"],
+                capture_output=True, text=True,
+            )
+            if configured.returncode == 0:
+                hooks = Path(configured.stdout.strip())
+                if not hooks.is_absolute():
+                    hooks = self.root / hooks
+            elif configured.returncode == 1:
+                default = subprocess.run(
+                    ["git", "-C", str(self.root), "rev-parse", "--git-path", "hooks"],
+                    capture_output=True, text=True,
+                )
+                if default.returncode != 0:
+                    raise ValueError("не удалось найти каталог Git hooks")
+                hooks = Path(default.stdout.strip())
+                if not hooks.is_absolute():
+                    hooks = self.root / hooks
+            else:
+                raise ValueError("не удалось прочитать настройку core.hooksPath")
+            hooks.mkdir(parents=True, exist_ok=True)
+            hook = hooks / "pre-commit"
+            base = f"exec {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} \"$repo_root\" --staged"
+            prefix = '#!/bin/sh\nrepo_root=$(git rev-parse --show-toplevel) || exit 2\n'
+            script = f"{prefix}{base} --fail-on-security\n"
+            previous_script = f"{prefix}{base} --fail-on-findings\n"
+            if hook.is_symlink():
+                raise ValueError("pre-commit уже существует; существующий hook не изменён")
+            if hook.exists():
+                current = hook.read_bytes()
+                if current == script.encode("utf-8"):
+                    return hook
+                if current != previous_script.encode("utf-8"):
+                    raise ValueError("pre-commit уже существует; существующий hook не изменён")
+                hook.write_text(script, encoding="utf-8")
+            else:
+                with hook.open("x", encoding="utf-8") as file:
+                    file.write(script)
+            hook.chmod(0o755)
+            return hook
+        except FileExistsError as error:
+            raise ValueError("pre-commit уже существует; существующий hook не изменён") from error
+        except OSError as error:
+            raise ValueError(f"не удалось установить pre-commit: {error}") from error
+
+
+def git_project_files(project: Path, excludes: tuple[str, ...]) -> list[Path] | None:
+    return GitWorkspace(project).list_files(excludes)
 
 
 def staged_mismatch_findings(project: Path, excludes: tuple[str, ...]) -> list[Finding]:
-    try:
-        root = subprocess.run(
-            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True,
-        )
-        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
-            return []
-        staged = subprocess.run(
-            ["git", "-C", str(project), "diff", "--cached", "--name-only", "-z", "--"],
-            capture_output=True,
-        )
-        worktree = subprocess.run(
-            ["git", "-C", str(project), "diff", "--name-only", "-z", "--"],
-            capture_output=True,
-        )
-    except OSError:
-        return []
-    if staged.returncode != 0 or worktree.returncode != 0:
-        return [make_finding("SCAN_ERROR", "не удалось сравнить подготовленные файлы с файлами на диске")]
-
-    staged_paths = set(staged.stdout.split(b"\0"))
-    worktree_paths = set(worktree.stdout.split(b"\0"))
-    findings = []
-    for raw_path in sorted((staged_paths & worktree_paths) - {b""}):
-        relative = Path(os.fsdecode(raw_path)).as_posix()
-        if any(part in IGNORED_DIRS for part in Path(relative).parts) or is_excluded(relative, excludes):
-            continue
-        findings.append(make_finding(
-            "SCAN_ERROR", "подготовленная версия отличается от файла на диске; содержимое коммита не проверено", relative,
-        ))
-    return findings
+    return GitWorkspace(project).mismatch_findings(excludes)
 
 
 def staged_files(project: Path, destination: Path) -> None:
-    try:
-        root = subprocess.run(
-            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True,
-        )
-        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
-            raise ValueError("--staged требует корень Git-репозитория")
-        entries = subprocess.run(
-            ["git", "-C", str(project), "ls-files", "--stage", "-z"], capture_output=True,
-        )
-        if entries.returncode != 0:
-            raise ValueError("не удалось получить список подготовленных файлов")
-        for entry in entries.stdout.split(b"\0"):
-            if not entry:
-                continue
-            metadata, raw_path = entry.split(b"\t", 1)
-            mode, blob_id, stage = metadata.split()
-            if stage != b"0":
-                raise ValueError("в Git index есть неразрешённые конфликты")
-            relative = Path(os.fsdecode(raw_path))
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ValueError("в Git index найден недопустимый путь")
-            if mode != b"100644" and mode != b"100755":
-                continue
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("wb") as file:
-                content = subprocess.run(
-                    ["git", "-C", str(project), "cat-file", "blob", blob_id.decode("ascii")],
-                    stdout=file, stderr=subprocess.PIPE,
-                )
-            if content.returncode != 0:
-                raise ValueError(f"не удалось прочитать подготовленный файл: {relative.as_posix()}")
-    except OSError as error:
-        raise ValueError(f"не удалось прочитать Git index: {error}") from error
+    GitWorkspace(project).export_staged(destination)
+
+
+class ProjectFiles:
+    def __init__(self, root: Path, exclude: tuple[str, ...] = ()) -> None:
+        self.root = root
+        self.exclude = exclude
+        self.git: GitWorkspace | None = None
+
+    def is_excluded(self, relative: str) -> bool:
+        return is_excluded(relative, self.exclude)
+
+    def collect(self, errors: list[Finding] | None = None) -> list[Path]:
+        listed = git_project_files(self.root, self.exclude)
+        if listed is not None:
+            self.git = GitWorkspace(self.root)
+            return listed
+
+        def on_walk_error(error: OSError) -> None:
+            relative = None
+            if error.filename:
+                try:
+                    relative = Path(error.filename).resolve().relative_to(self.root.resolve()).as_posix()
+                except ValueError:
+                    pass
+            if errors is not None:
+                errors.append(make_finding("SCAN_ERROR", f"не удалось прочитать папку: {error.strerror or error}", relative))
+
+        files = []
+        for directory, subdirs, names in os.walk(self.root, onerror=on_walk_error):
+            subdirs[:] = sorted(
+                name for name in subdirs
+                if name not in IGNORED_DIRS
+                and not (Path(directory) / name).is_symlink()
+                and not self.is_excluded((Path(directory) / name).relative_to(self.root).as_posix())
+            )
+            for name in sorted(names):
+                path = Path(directory) / name
+                if path.is_file() and not path.is_symlink() and not self.is_excluded(path.relative_to(self.root).as_posix()):
+                    files.append(path)
+        return files
 
 
 def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Finding] | None = None) -> list[Path]:
-    git_files = git_project_files(project, excludes)
-    if git_files is not None:
-        return git_files
-
-    def on_walk_error(error: OSError) -> None:
-        relative = None
-        if error.filename:
-            try:
-                relative = Path(error.filename).resolve().relative_to(project.resolve()).as_posix()
-            except ValueError:
-                pass
-        if errors is not None:
-            errors.append(make_finding("SCAN_ERROR", f"не удалось прочитать папку: {error.strerror or error}", relative))
-
-    files = []
-    for directory, subdirs, names in os.walk(project, onerror=on_walk_error):
-        subdirs[:] = sorted(
-            name for name in subdirs
-            if name not in IGNORED_DIRS
-            and not (Path(directory) / name).is_symlink()
-            and not is_excluded((Path(directory) / name).relative_to(project).as_posix(), excludes)
-        )
-        for name in sorted(names):
-            path = Path(directory) / name
-            if path.is_file() and not path.is_symlink() and not is_excluded(path.relative_to(project).as_posix(), excludes):
-                files.append(path)
-    return files
+    return ProjectFiles(project, excludes).collect(errors)
 
 
 def scan_details(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[Finding]:
-    findings: list[Finding] = []
-    files = project_files(project, excludes, findings)
-    findings.extend(staged_mismatch_findings(project, excludes))
-    findings.extend(ProjectLevelCheck().apply(project, files, max_size_mib))
-    findings.extend(DependencyCheck().apply(project, files, max_size_mib))
-    private_keys = PrivateKeyCheck()
-    file_check = FileCheck()
-    secrets = SecretCheck()
-    for path in files:
-        findings.extend(private_keys.apply(project, [path], max_size_mib))
-        file_findings = file_check.apply(project, [path], max_size_mib)
-        findings.extend(item for item in file_findings if item["code"] == "SENSITIVE")
-        findings.extend(secrets.apply(project, [path], max_size_mib))
-        findings.extend(item for item in file_findings if item["code"] != "SENSITIVE")
-    return findings
+    return Scanner(Settings(max_size_mib, excludes)).run(project)
 
 
 def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tuple[str, ...] = ()) -> list[str]:
@@ -517,6 +584,35 @@ class Settings:
         if not isinstance(excludes, list) or any(not isinstance(pattern, str) or not pattern for pattern in excludes):
             raise ValueError("exclude должен быть списком непустых строк")
         return cls(max_size_mib, tuple(excludes))
+
+
+class Scanner:
+    def __init__(self, settings: Settings, checks: tuple[Check, ...] | None = None) -> None:
+        self.settings = settings
+        self.checks = checks or (
+            ProjectLevelCheck(),
+            DependencyCheck(),
+            PrivateKeyCheck(),
+            FileCheck(),
+            SecretCheck(),
+        )
+
+    def run(self, project: Path) -> list[Finding]:
+        findings: list[Finding] = []
+        files = project_files(project, self.settings.exclude, findings)
+        findings.extend(staged_mismatch_findings(project, self.settings.exclude))
+        by_type = {type(check): check for check in self.checks}
+        limit = self.settings.max_size_mib
+        findings.extend(by_type[ProjectLevelCheck].apply(project, files, limit))
+        findings.extend(by_type[DependencyCheck].apply(project, files, limit))
+        for path in files:
+            one = [path]
+            findings.extend(by_type[PrivateKeyCheck].apply(project, one, limit))
+            file_findings = by_type[FileCheck].apply(project, one, limit)
+            findings.extend(item for item in file_findings if item["code"] == "SENSITIVE")
+            findings.extend(by_type[SecretCheck].apply(project, one, limit))
+            findings.extend(item for item in file_findings if item["code"] != "SENSITIVE")
+        return findings
 
 
 def load_config(project: Path) -> tuple[int, tuple[str, ...]]:
@@ -554,57 +650,7 @@ class Report:
 
 
 def install_hook(project: Path) -> Path:
-    try:
-        root = subprocess.run(
-            ["git", "-C", str(project), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True,
-        )
-        if root.returncode != 0 or Path(root.stdout.strip()).resolve() != project.resolve():
-            raise ValueError("установка hook требует корень Git-репозитория")
-        configured = subprocess.run(
-            ["git", "-C", str(project), "config", "--path", "--get", "core.hooksPath"],
-            capture_output=True, text=True,
-        )
-        if configured.returncode == 0:
-            hooks = Path(configured.stdout.strip())
-            if not hooks.is_absolute():
-                hooks = project / hooks
-        elif configured.returncode == 1:
-            default = subprocess.run(
-                ["git", "-C", str(project), "rev-parse", "--git-path", "hooks"],
-                capture_output=True, text=True,
-            )
-            if default.returncode != 0:
-                raise ValueError("не удалось найти каталог Git hooks")
-            hooks = Path(default.stdout.strip())
-            if not hooks.is_absolute():
-                hooks = project / hooks
-        else:
-            raise ValueError("не удалось прочитать настройку core.hooksPath")
-        hooks.mkdir(parents=True, exist_ok=True)
-        hook = hooks / "pre-commit"
-        base = f"exec {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} \"$repo_root\" --staged"
-        prefix = '#!/bin/sh\nrepo_root=$(git rev-parse --show-toplevel) || exit 2\n'
-        script = f"{prefix}{base} --fail-on-security\n"
-        previous_script = f"{prefix}{base} --fail-on-findings\n"
-        if hook.is_symlink():
-            raise ValueError("pre-commit уже существует; существующий hook не изменён")
-        if hook.exists():
-            current = hook.read_bytes()
-            if current == script.encode("utf-8"):
-                return hook
-            if current != previous_script.encode("utf-8"):
-                raise ValueError("pre-commit уже существует; существующий hook не изменён")
-            hook.write_text(script, encoding="utf-8")
-        else:
-            with hook.open("x", encoding="utf-8") as file:
-                file.write(script)
-        hook.chmod(0o755)
-        return hook
-    except FileExistsError as error:
-        raise ValueError("pre-commit уже существует; существующий hook не изменён") from error
-    except OSError as error:
-        raise ValueError(f"не удалось установить pre-commit: {error}") from error
+    return GitWorkspace(project).install_hook()
 
 
 def main() -> int:
