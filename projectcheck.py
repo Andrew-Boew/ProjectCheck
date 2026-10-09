@@ -28,11 +28,45 @@ YAML_CONFIG_NAMES = {
 NODE_LOCK_FILES = {"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"}
 CI_FILES = {".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile", ".circleci/config.yml", ".travis.yml"}
 PRIVATE_KEY_HEADER = re.compile(rb"^-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----$")
-Finding = dict[str, str | int | None]
+
+
+class Finding:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        path: str | None = None,
+        line: int | None = None,
+        confidence: str = "high",
+    ) -> None:
+        self.code = code
+        self.message = message
+        self.path = path
+        self.line = line
+        self.confidence = confidence
+
+    def as_dict(self) -> dict[str, str | int | None]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "path": self.path,
+            "line": self.line,
+            "confidence": self.confidence,
+        }
+
+    def __getitem__(self, key: str) -> str | int | None:
+        return self.as_dict()[key]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Finding):
+            return self.as_dict() == other.as_dict()
+        if isinstance(other, dict):
+            return self.as_dict() == other
+        return NotImplemented
 
 
 def make_finding(code: str, message: str, path: str | None = None, line: int | None = None, confidence: str = "high") -> Finding:
-    return {"code": code, "message": message, "path": path, "line": line, "confidence": confidence}
+    return Finding(code, message, path, line, confidence)
 
 
 def format_finding(item: Finding) -> str:
@@ -395,26 +429,66 @@ def scan(project: Path, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, excludes: tupl
     return [format_finding(item) for item in scan_details(project, max_size_mib, excludes)]
 
 
-def load_config(project: Path) -> tuple[int, tuple[str, ...]]:
-    path = project / ".projectcheck.toml"
-    if not path.exists():
-        return DEFAULT_MAX_SIZE_MIB, ()
-    try:
-        with path.open("rb") as file:
-            config = tomllib.load(file)
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise ValueError(f"не удалось прочитать {path.name}: {error}") from error
+class Settings:
+    def __init__(self, max_size_mib: int = DEFAULT_MAX_SIZE_MIB, exclude: tuple[str, ...] = ()) -> None:
+        self.max_size_mib = max_size_mib
+        self.exclude = exclude
 
-    unknown = set(config) - {"max_size_mib", "exclude"}
-    if unknown:
-        raise ValueError(f"неизвестные настройки в {path.name}: {', '.join(sorted(unknown))}")
-    max_size_mib = config.get("max_size_mib", DEFAULT_MAX_SIZE_MIB)
-    excludes = config.get("exclude", [])
-    if type(max_size_mib) is not int or max_size_mib <= 0:
-        raise ValueError("max_size_mib должен быть положительным целым числом")
-    if not isinstance(excludes, list) or any(not isinstance(pattern, str) or not pattern for pattern in excludes):
-        raise ValueError("exclude должен быть списком непустых строк")
-    return max_size_mib, tuple(excludes)
+    @classmethod
+    def load(cls, project: Path) -> "Settings":
+        path = project / ".projectcheck.toml"
+        if not path.exists():
+            return cls()
+        try:
+            with path.open("rb") as file:
+                config = tomllib.load(file)
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise ValueError(f"не удалось прочитать {path.name}: {error}") from error
+
+        unknown = set(config) - {"max_size_mib", "exclude"}
+        if unknown:
+            raise ValueError(f"неизвестные настройки в {path.name}: {', '.join(sorted(unknown))}")
+        max_size_mib = config.get("max_size_mib", DEFAULT_MAX_SIZE_MIB)
+        excludes = config.get("exclude", [])
+        if type(max_size_mib) is not int or max_size_mib <= 0:
+            raise ValueError("max_size_mib должен быть положительным целым числом")
+        if not isinstance(excludes, list) or any(not isinstance(pattern, str) or not pattern for pattern in excludes):
+            raise ValueError("exclude должен быть списком непустых строк")
+        return cls(max_size_mib, tuple(excludes))
+
+
+def load_config(project: Path) -> tuple[int, tuple[str, ...]]:
+    settings = Settings.load(project)
+    return settings.max_size_mib, settings.exclude
+
+
+class Report:
+    def __init__(self, findings: list[Finding], output_format: str) -> None:
+        self.findings = findings
+        self.format = output_format
+
+    def exit_code(self, fail_on_findings: bool = False, fail_on_security: bool = False) -> int:
+        if any(item["code"] == "SCAN_ERROR" for item in self.findings):
+            return 2
+        if fail_on_findings and self.findings:
+            return 1
+        if fail_on_security and any(item["code"] in SECURITY_CODES for item in self.findings):
+            return 1
+        return 0
+
+    def render(self, project: Path) -> str:
+        if self.format == "json":
+            payload = {
+                "project": str(project),
+                "count": len(self.findings),
+                "findings": [item.as_dict() for item in self.findings],
+            }
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        if not self.findings:
+            return "Замечаний не найдено"
+        lines = [f"- {format_finding(item)}" for item in self.findings]
+        lines.append(f"Найдено замечаний: {len(self.findings)}")
+        return "\n".join(lines)
 
 
 def install_hook(project: Path) -> Path:
@@ -495,13 +569,13 @@ def main() -> int:
         return 0
 
     try:
-        config_size_mib, config_excludes = load_config(project)
+        settings = Settings.load(project)
     except ValueError as error:
         parser.error(str(error))
-    max_size_mib = args.max_size_mib if args.max_size_mib is not None else config_size_mib
+    max_size_mib = args.max_size_mib if args.max_size_mib is not None else settings.max_size_mib
     if max_size_mib <= 0:
         parser.error("--max-size-mib должен быть положительным числом")
-    excludes = config_excludes + tuple(args.exclude)
+    excludes = settings.exclude + tuple(args.exclude)
 
     if args.staged:
         try:
@@ -513,24 +587,10 @@ def main() -> int:
             parser.error(str(error))
     else:
         findings = scan_details(project, max_size_mib=max_size_mib, excludes=excludes)
-    if any(finding["code"] == "SCAN_ERROR" for finding in findings):
-        exit_code = 2
-    else:
-        exit_code = 1 if (args.fail_on_findings and findings) or (
-            args.fail_on_security and any(finding["code"] in SECURITY_CODES for finding in findings)
-        ) else 0
-    if args.format == "json":
-        print(json.dumps({"project": str(project), "count": len(findings), "findings": findings}, ensure_ascii=False, indent=2))
-        return exit_code
-
-    if findings:
-        for finding in findings:
-            print(f"- {format_finding(finding)}")
-        print(f"Найдено замечаний: {len(findings)}")
-    else:
-        print("Замечаний не найдено")
-    return exit_code
-
+    report = Report(findings, args.format)
+    print(report.render(project))
+    return report.exit_code(args.fail_on_findings, args.fail_on_security)
+    
 
 if __name__ == "__main__":
     raise SystemExit(main())
