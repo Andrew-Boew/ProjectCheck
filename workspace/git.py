@@ -16,14 +16,22 @@ class GitWorkspace:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    def repository_root(self) -> Path | None:
+        top = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        if top.returncode != 0:
+            return None
+        found = Path(top.stdout.strip()).resolve()
+        if found != self.root.resolve():
+            return None
+        return found
+
     def list_files(self, excludes: tuple[str, ...]) -> list[Path] | None:
         try:
-            top = subprocess.run(
-                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-            )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+            if self.repository_root() is None:
                 return None
             result = subprocess.run(
                 ["git", "-C", str(self.root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
@@ -51,11 +59,7 @@ class GitWorkspace:
 
     def mismatch_findings(self, excludes: tuple[str, ...]) -> list[Finding]:
         try:
-            top = subprocess.run(
-                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True,
-            )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+            if self.repository_root() is None:
                 return []
             staged = subprocess.run(
                 ["git", "-C", str(self.root), "diff", "--cached", "--name-only", "-z", "--"],
@@ -84,11 +88,7 @@ class GitWorkspace:
 
     def export_staged(self, destination: Path) -> None:
         try:
-            top = subprocess.run(
-                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True,
-            )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+            if self.repository_root() is None:
                 raise ValueError("--staged требует корень Git-репозитория")
             entries = subprocess.run(
                 ["git", "-C", str(self.root), "ls-files", "--stage", "-z"], capture_output=True,
@@ -121,11 +121,7 @@ class GitWorkspace:
 
     def install_hook(self) -> Path:
         try:
-            top = subprocess.run(
-                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True,
-            )
-            if top.returncode != 0 or Path(top.stdout.strip()).resolve() != self.root.resolve():
+            if self.repository_root() is None:
                 raise ValueError("установка hook требует корень Git-репозитория")
             configured = subprocess.run(
                 ["git", "-C", str(self.root), "config", "--path", "--get", "core.hooksPath"],

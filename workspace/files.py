@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from constants import IGNORED_DIRS, is_excluded
 from model.finding import Finding, make_finding
+
+if TYPE_CHECKING:
+    from workspace.git import GitWorkspace
 
 
 class ProjectFiles:
     def __init__(self, root: Path, exclude: tuple[str, ...] = ()) -> None:
         self.root = root
         self.exclude = exclude
-        self.git: object | None = None
+        self.git: GitWorkspace | None = None
 
     def is_excluded(self, relative: str) -> bool:
         return is_excluded(relative, self.exclude)
