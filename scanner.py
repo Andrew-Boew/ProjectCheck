@@ -4,6 +4,8 @@ from collections.abc import Callable
 from checks.rules import Check, default_checks
 from model.finding import Finding
 from model.settings import Settings
+from workspace.files import project_files
+from workspace.git import staged_mismatch_findings
 
 
 class Scanner:
@@ -21,8 +23,6 @@ class Scanner:
 
     def run(self, project: Path) -> list[Finding]:
         if self.list_files is None or self.mismatch_findings is None:
-            from workspace.files import project_files
-            from workspace.git import staged_mismatch_findings
             list_files = self.list_files or project_files
             mismatch_findings = self.mismatch_findings or staged_mismatch_findings
         else:
