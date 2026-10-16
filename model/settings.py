@@ -30,8 +30,3 @@ class Settings:
         if not isinstance(excludes, list) or any(not isinstance(pattern, str) or not pattern for pattern in excludes):
             raise ValueError("exclude должен быть списком непустых строк")
         return cls(max_size_mib, tuple(excludes))
-
-
-def load_config(project: Path) -> tuple[int, tuple[str, ...]]:
-    settings = Settings.load(project)
-    return settings.max_size_mib, settings.exclude

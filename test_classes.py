@@ -16,8 +16,8 @@ from workspace.git import GitWorkspace
 class FindingTests(unittest.TestCase):
     def test_finding_keeps_fields_and_matches_dict(self) -> None:
         item = make_finding("LARGE", "файл больше 10 МиБ", "video.mov", confidence="high")
-        self.assertEqual(item["code"], "LARGE")
-        self.assertEqual(item["line"], None)
+        self.assertEqual(item.code, "LARGE")
+        self.assertEqual(item.line, None)
         self.assertEqual(item.as_dict(), {
             "code": "LARGE",
             "message": "файл больше 10 МиБ",
@@ -25,7 +25,6 @@ class FindingTests(unittest.TestCase):
             "line": None,
             "confidence": "high",
         })
-        self.assertEqual(item, item.as_dict())
 
 
 class SettingsTests(unittest.TestCase):
@@ -79,7 +78,7 @@ class CheckTests(unittest.TestCase):
             project = Path(directory)
             empty = ProjectLevelCheck().apply(project, [], 10)
             self.assertEqual(
-                [item["code"] for item in empty],
+                [item.code for item in empty],
                 ["README", "GITIGNORE", "TESTS", "LICENSE", "CI"],
             )
             (project / "README.md").write_text("Project\n")
@@ -102,9 +101,9 @@ class CheckTests(unittest.TestCase):
             with large.open("wb") as file:
                 file.truncate(10 * 1024 * 1024 + 1)
             findings = FileCheck().apply(project, [temp, large], 10)
-            codes = [item["code"] for item in findings]
+            codes = [item.code for item in findings]
             self.assertEqual(codes, ["TEMP", "LARGE"])
-            self.assertEqual(findings[1]["path"], "video.mov")
+            self.assertEqual(findings[1].path, "video.mov")
 
 
 class ParserTests(unittest.TestCase):
@@ -118,8 +117,8 @@ class ParserTests(unittest.TestCase):
             parser = PythonSecretParser()
             found = parser.parse(settings, "settings.py")
             self.assertEqual(len(found), 1)
-            self.assertEqual(found[0]["code"], "HARDCODED_SECRET")
-            self.assertEqual(found[0]["line"], 1)
+            self.assertEqual(found[0].code, "HARDCODED_SECRET")
+            self.assertEqual(found[0].line, 1)
             self.assertEqual(parser.parse(other, "app.py"), [])
 
 
@@ -156,12 +155,12 @@ class ScannerTests(unittest.TestCase):
             project = Path(directory)
             (project / "a.txt").write_text("x")
             findings = Scanner(Settings(), checks=(WholeProject(), OneFile())).run(project)
-        self.assertEqual([item["code"] for item in findings], ["README", "TEMP"])
+        self.assertEqual([item.code for item in findings], ["README", "TEMP"])
 
     def test_scanner_on_empty_directory_returns_five_project_findings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             findings = Scanner(Settings()).run(Path(directory))
         self.assertEqual(
-            [item["code"] for item in findings],
+            [item.code for item in findings],
             ["README", "GITIGNORE", "TESTS", "LICENSE", "CI"],
         )

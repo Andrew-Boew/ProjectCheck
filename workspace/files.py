@@ -1,13 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from constants import IGNORED_DIRS, is_excluded
 from model.finding import Finding, make_finding
-
-if TYPE_CHECKING:
-    from workspace.git import GitWorkspace
+from workspace.git import GitWorkspace
 
 
 class ProjectFiles:
@@ -20,12 +18,10 @@ class ProjectFiles:
         return is_excluded(relative, self.exclude)
 
     def collect(self, errors: list[Finding] | None = None) -> list[Path]:
-        import projectcheck
-        from workspace.git import GitWorkspace
-
-        listed = projectcheck.git_project_files(self.root, self.exclude)
+        workspace = GitWorkspace(self.root)
+        listed = workspace.list_files(self.exclude)
         if listed is not None:
-            self.git = GitWorkspace(self.root)
+            self.git = workspace
             return listed
 
         def on_walk_error(error: OSError) -> None:
@@ -39,7 +35,7 @@ class ProjectFiles:
                 errors.append(make_finding("SCAN_ERROR", f"не удалось прочитать папку: {error.strerror or error}", relative))
 
         files = []
-        for directory, subdirs, names in projectcheck.os.walk(self.root, onerror=on_walk_error):
+        for directory, subdirs, names in os.walk(self.root, onerror=on_walk_error):
             subdirs[:] = sorted(
                 name for name in subdirs
                 if name not in IGNORED_DIRS

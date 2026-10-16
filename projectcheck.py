@@ -1,22 +1,18 @@
 import argparse
-import os
 from pathlib import Path
 import tempfile
 
 from constants import DEFAULT_MAX_SIZE_MIB
-from model.finding import format_finding, make_finding
+from model.finding import format_finding
 from model.report import Report
-from model.settings import Settings, load_config
+from model.settings import Settings
 from scanner import Scanner
 from workspace.files import project_files
-from workspace.git import git_project_files, install_hook, staged_files, staged_mismatch_findings
+from workspace.git import install_hook, staged_files, staged_mismatch_findings
 
 __all__ = [
-    "git_project_files",
     "install_hook",
-    "load_config",
     "main",
-    "make_finding",
     "project_files",
     "scan",
     "scan_details",
