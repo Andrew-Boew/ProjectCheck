@@ -1,53 +1,46 @@
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
-from constants import IGNORED_DIRS, is_excluded
-from model.finding import Finding, make_finding
+from model.finding import Finding
+from workspace.exclusions import Exclusions
 from workspace.git import GitWorkspace
 
 
 class ProjectFiles:
-    def __init__(self, root: Path, exclude: tuple[str, ...] = ()) -> None:
+    def __init__(self, root: Path, exclusions: Exclusions | None = None) -> None:
         self.root = root
-        self.exclude = exclude
+        self.exclusions = exclusions or Exclusions()
         self.git: GitWorkspace | None = None
-
-    def is_excluded(self, relative: str) -> bool:
-        return is_excluded(relative, self.exclude)
+        self.errors: list[Finding] | None = None
 
     def collect(self, errors: list[Finding] | None = None) -> list[Path]:
         workspace = GitWorkspace(self.root)
-        listed = workspace.list_files(self.exclude)
+        listed = workspace.list_files(self.exclusions)
         if listed is not None:
             self.git = workspace
             return listed
 
-        def on_walk_error(error: OSError) -> None:
-            relative = None
-            if error.filename:
-                try:
-                    relative = Path(error.filename).resolve().relative_to(self.root.resolve()).as_posix()
-                except ValueError:
-                    pass
-            if errors is not None:
-                errors.append(make_finding("SCAN_ERROR", f"не удалось прочитать папку: {error.strerror or error}", relative))
-
+        self.errors = errors
         files = []
-        for directory, subdirs, names in os.walk(self.root, onerror=on_walk_error):
+        for directory, subdirs, names in os.walk(self.root, onerror=self.remember_walk_error):
             subdirs[:] = sorted(
                 name for name in subdirs
-                if name not in IGNORED_DIRS
+                if not self.exclusions.skips_directory(name)
                 and not (Path(directory) / name).is_symlink()
-                and not self.is_excluded((Path(directory) / name).relative_to(self.root).as_posix())
+                and not self.exclusions.matches((Path(directory) / name).relative_to(self.root).as_posix())
             )
             for name in sorted(names):
                 path = Path(directory) / name
-                if path.is_file() and not path.is_symlink() and not self.is_excluded(path.relative_to(self.root).as_posix()):
+                if path.is_file() and not path.is_symlink() and not self.exclusions.matches(path.relative_to(self.root).as_posix()):
                     files.append(path)
         return files
 
-
-def project_files(project: Path, excludes: tuple[str, ...] = (), errors: list[Finding] | None = None) -> list[Path]:
-    return ProjectFiles(project, excludes).collect(errors)
+    def remember_walk_error(self, error: OSError) -> None:
+        relative = None
+        if error.filename:
+            try:
+                relative = Path(error.filename).resolve().relative_to(self.root.resolve()).as_posix()
+            except ValueError:
+                pass
+        if self.errors is not None:
+            self.errors.append(Finding("SCAN_ERROR", f"не удалось прочитать папку: {error.strerror or error}", relative))

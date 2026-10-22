@@ -4,18 +4,20 @@ import unittest
 from pathlib import Path
 
 from checks.rules import Check, FileCheck, ProjectLevelCheck
-from model.finding import make_finding
+from model.finding import Finding
 from model.report import Report
 from model.settings import Settings
+from model.view import ReportJson, ReportText
 from parsers.secrets import PythonSecretParser
 from scanner import Scanner
+from workspace.exclusions import Exclusions
 from workspace.files import ProjectFiles
 from workspace.git import GitWorkspace
 
 
 class FindingTests(unittest.TestCase):
     def test_finding_keeps_fields_and_matches_dict(self) -> None:
-        item = make_finding("LARGE", "файл больше 10 МиБ", "video.mov", confidence="high")
+        item = Finding("LARGE", "файл больше 10 МиБ", "video.mov", confidence="high")
         self.assertEqual(item.code, "LARGE")
         self.assertEqual(item.line, None)
         self.assertEqual(item.as_dict(), {
@@ -52,21 +54,21 @@ class SettingsTests(unittest.TestCase):
 
 class ReportTests(unittest.TestCase):
     def test_exit_code_follows_scan_error_and_flags(self) -> None:
-        error = make_finding("SCAN_ERROR", "не удалось прочитать файл", "blocked.bin")
-        readme = make_finding("README", "добавьте описание проекта")
-        secret = make_finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", ".env", confidence="medium")
-        self.assertEqual(Report([error], "text").exit_code(), 2)
-        self.assertEqual(Report([readme], "text").exit_code(fail_on_findings=True), 1)
-        self.assertEqual(Report([readme], "text").exit_code(fail_on_security=True), 0)
-        self.assertEqual(Report([secret], "text").exit_code(fail_on_security=True), 1)
-        self.assertEqual(Report([], "text").exit_code(fail_on_findings=True), 0)
+        error = Finding("SCAN_ERROR", "не удалось прочитать файл", "blocked.bin")
+        readme = Finding("README", "добавьте описание проекта")
+        secret = Finding("SENSITIVE", "проверьте потенциально конфиденциальный файл", ".env", confidence="medium")
+        self.assertEqual(Report([error]).exit_code(), 2)
+        self.assertEqual(Report([readme]).exit_code(fail_on_findings=True), 1)
+        self.assertEqual(Report([readme]).exit_code(fail_on_security=True), 0)
+        self.assertEqual(Report([secret]).exit_code(fail_on_security=True), 1)
+        self.assertEqual(Report([]).exit_code(fail_on_findings=True), 0)
 
     def test_render_text_and_json(self) -> None:
         project = Path("/tmp/sample")
-        empty = Report([], "text").render(project)
+        empty = ReportText().render(Report([]), project)
         self.assertEqual(empty, "Замечаний не найдено")
-        report = Report([make_finding("README", "добавьте описание проекта")], "json")
-        payload = json.loads(report.render(project))
+        report = ReportJson().render(Report([Finding("README", "добавьте описание проекта")]), project)
+        payload = json.loads(report)
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["findings"][0]["code"], "README")
         self.assertEqual(payload["project"], str(project))
@@ -131,7 +133,7 @@ class WorkspaceTests(unittest.TestCase):
             (venv / "test_dependency.py").write_text("pass\n")
             (project / "keep.txt").write_text("ok")
             (project / "skip.bak").write_text("no")
-            files = ProjectFiles(project, ("*.bak",))
+            files = ProjectFiles(project, Exclusions(("*.bak",)))
             listed = files.collect()
             names = {path.name for path in listed}
             self.assertEqual(names, {"keep.txt"})
@@ -143,13 +145,13 @@ class ScannerTests(unittest.TestCase):
     def test_scanner_runs_checks_in_list_order(self) -> None:
         class WholeProject(Check):
             def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list:
-                return [make_finding("README", "сначала проект")]
+                return [Finding("README", "сначала проект")]
 
         class OneFile(Check):
             each_file = True
 
             def apply(self, project: Path, files: list[Path], max_size_mib: int) -> list:
-                return [make_finding("TEMP", "потом файл", files[0].name)]
+                return [Finding("TEMP", "потом файл", files[0].name)]
 
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

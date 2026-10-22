@@ -4,12 +4,8 @@ import shlex
 import subprocess
 import sys
 
-from constants import IGNORED_DIRS, is_excluded
-from model.finding import Finding, make_finding
-
-
-def _entry_script() -> Path:
-    return Path(__file__).resolve().parents[1] / "projectcheck.py"
+from model.finding import Finding
+from workspace.exclusions import Exclusions
 
 
 class GitWorkspace:
@@ -29,7 +25,11 @@ class GitWorkspace:
             return None
         return found
 
-    def list_files(self, excludes: tuple[str, ...]) -> list[Path] | None:
+    @staticmethod
+    def entry_script() -> Path:
+        return Path(__file__).resolve().parents[1] / "projectcheck.py"
+
+    def list_files(self, exclusions: Exclusions) -> list[Path] | None:
         try:
             if self.repository_root() is None:
                 return None
@@ -51,13 +51,13 @@ class GitWorkspace:
             if (
                 path.is_file()
                 and not path.is_symlink()
-                and not any(part in IGNORED_DIRS for part in Path(relative).parts)
-                and not is_excluded(Path(relative).as_posix(), excludes)
+                and not any(exclusions.skips_directory(part) for part in Path(relative).parts)
+                and not exclusions.matches(Path(relative).as_posix())
             ):
                 files.append(path)
         return sorted(files)
 
-    def mismatch_findings(self, excludes: tuple[str, ...]) -> list[Finding]:
+    def mismatch_findings(self, exclusions: Exclusions) -> list[Finding]:
         try:
             if self.repository_root() is None:
                 return []
@@ -72,16 +72,16 @@ class GitWorkspace:
         except OSError:
             return []
         if staged.returncode != 0 or worktree.returncode != 0:
-            return [make_finding("SCAN_ERROR", "не удалось сравнить подготовленные файлы с файлами на диске")]
+            return [Finding("SCAN_ERROR", "не удалось сравнить подготовленные файлы с файлами на диске")]
 
         staged_paths = set(staged.stdout.split(b"\0"))
         worktree_paths = set(worktree.stdout.split(b"\0"))
         findings: list[Finding] = []
         for raw_path in sorted((staged_paths & worktree_paths) - {b""}):
             relative = Path(os.fsdecode(raw_path)).as_posix()
-            if any(part in IGNORED_DIRS for part in Path(relative).parts) or is_excluded(relative, excludes):
+            if any(exclusions.skips_directory(part) for part in Path(relative).parts) or exclusions.matches(relative):
                 continue
-            findings.append(make_finding(
+            findings.append(Finding(
                 "SCAN_ERROR", "подготовленная версия отличается от файла на диске; содержимое коммита не проверено", relative,
             ))
         return findings
@@ -145,7 +145,7 @@ class GitWorkspace:
                 raise ValueError("не удалось прочитать настройку core.hooksPath")
             hooks.mkdir(parents=True, exist_ok=True)
             hook = hooks / "pre-commit"
-            base = f"exec {shlex.quote(sys.executable)} {shlex.quote(str(_entry_script()))} \"$repo_root\" --staged"
+            base = f"exec {shlex.quote(sys.executable)} {shlex.quote(str(self.entry_script()))} \"$repo_root\" --staged"
             prefix = '#!/bin/sh\nrepo_root=$(git rev-parse --show-toplevel) || exit 2\n'
             script = f"{prefix}{base} --fail-on-security\n"
             previous_script = f"{prefix}{base} --fail-on-findings\n"
@@ -167,19 +167,3 @@ class GitWorkspace:
             raise ValueError("pre-commit уже существует; существующий hook не изменён") from error
         except OSError as error:
             raise ValueError(f"не удалось установить pre-commit: {error}") from error
-
-
-def git_project_files(project: Path, excludes: tuple[str, ...]) -> list[Path] | None:
-    return GitWorkspace(project).list_files(excludes)
-
-
-def staged_mismatch_findings(project: Path, excludes: tuple[str, ...]) -> list[Finding]:
-    return GitWorkspace(project).mismatch_findings(excludes)
-
-
-def staged_files(project: Path, destination: Path) -> None:
-    GitWorkspace(project).export_staged(destination)
-
-
-def install_hook(project: Path) -> Path:
-    return GitWorkspace(project).install_hook()
