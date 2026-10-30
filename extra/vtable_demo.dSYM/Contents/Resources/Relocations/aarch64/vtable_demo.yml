@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     "/Users/tim46/Documents/Лабы/ОПП/2/extra/vtable_demo"
+relocations:     []
+...
